@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-terminal: #090c10;
+    --bg-surface: #0e131b;
+    --bg-surface-elevated: #151c27;
+    --bg-surface-hover: #1b2332;
+    --border-subtle: #1e2638;
+    --border-strong: #2c384e;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #586069;
+    --accent-green: #10b981;
+    --accent-green-bg: rgba(16, 185, 129, 0.12);
+    --accent-red: #f43f5e;
+    --accent-red-bg: rgba(244, 63, 94, 0.12);
+    --accent-cyan: #38bdf8;
+    --accent-amber: #f59e0b;
+  }
+
+  body {
+    background-color: #080b10;
+    color: #e2e8f0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    overflow-x: hidden;
+    letter-spacing: -0.01em;
+  }
+}
+
+/* Monospace font class for numbers and financial data */
+.font-mono-data {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-feature-settings: "tnum" 1, "zero" 1;
+}
+
+/* Custom terminal scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #090c10;
+}
+::-webkit-scrollbar-thumb {
+  background: #1f2839;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* Utility classes for terminal borders and panels */
+.terminal-panel {
+  background-color: #0d121a;
+  border: 1px solid #1a2232;
+}
+
+.terminal-panel-hover:hover {
+  border-color: #2a374f;
+}
+
+.terminal-header {
+  border-bottom: 1px solid #1a2232;
+  background-color: #0b0f16;
+}
+
+/* Animation utilities */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

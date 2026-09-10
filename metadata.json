@@ -1,0 +1,6 @@
+{
+  "name": "ApexQuant - Crypto Backtesting Terminal",
+  "description": "Institutional-grade cryptocurrency backtesting, quantitative research, risk analytics, and strategy optimization terminal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
