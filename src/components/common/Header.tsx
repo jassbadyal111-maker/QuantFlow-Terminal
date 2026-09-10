@@ -54,7 +54,7 @@ export const Header: React.FC<HeaderProps> = ({
                 PRO TERMINAL
               </span>
             </div>
-            <div className="text-[10px] text-slate-400 font-mono-data">v4.2.1 · Tick Engine</div>
+            <div className="text-[10px] text-slate-400 font-mono-data">v4.3.0 · Event Engine</div>
           </div>
         </div>
 
@@ -158,9 +158,8 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
           </span>
           <Database className="w-3 h-3 text-slate-400" />
-          <span className="text-slate-300 font-mono-data">Tick L2 Cache</span>
-          <span className="text-[10px] px-1 py-0.2 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">
-            DEMO DATA
+          <span className="text-[10px] px-1.5 py-0.5 rounded font-mono-data font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/40">
+            DEMO / SYNTHETIC DATA
           </span>
         </div>
 

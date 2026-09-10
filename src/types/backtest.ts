@@ -39,6 +39,28 @@ export interface Strategy {
   parameters: Record<string, number | string | boolean>;
 }
 
+export interface DatasetMetadata {
+  id: string;
+  name: string;
+  source: 'DEMO_SYNTHETIC' | 'EXCHANGE_API';
+  providerName: string;
+  symbol: string;
+  timeframe: string;
+  dateRange: {
+    start: string;
+    end: string;
+  };
+  totalBars: number;
+  missingBarsCount: number;
+  duplicateCount: number;
+  timezone: string;
+  seed?: number;
+  version: string;
+  isSynthetic: boolean;
+  validationStatus: 'PASSED' | 'WARNINGS' | 'FAILED';
+  validationNotes?: string[];
+}
+
 export interface BacktestConfig {
   strategyId: string;
   exchange: string;
@@ -51,6 +73,7 @@ export interface BacktestConfig {
   };
   initialCapital: number;
   leverage: number;
+  marginMode?: 'CROSS' | 'ISOLATED';
   positionSizing: {
     type: 'fixed_usd' | 'percent_equity' | 'vol_target' | 'kelly';
     value: number; // e.g. 10000 USD or 20% equity
@@ -80,11 +103,14 @@ export interface BacktestConfig {
   execution: {
     makerFeeBps: number;
     takerFeeBps: number;
+    bidAskSpreadBps?: number;
     slippageModel: 'fixed' | 'linear_impact' | 'sqrt_impact';
     slippageBps: number;
     fundingRate8hBps: number;
     latencyMs: number;
+    partialFillProbability?: number;
   };
+  dataset?: DatasetMetadata;
 }
 
 export interface CandleData {
@@ -132,10 +158,13 @@ export interface Trade {
   funding: number;
   netPnl: number;
   slippageBps: number;
-  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'SIGNAL_REVERSAL' | 'TIME_STOP' | 'TRAILING_STOP';
+  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'SIGNAL_REVERSAL' | 'TIME_STOP' | 'TRAILING_STOP' | 'LIQUIDATION' | 'MANUAL';
   durationBars: number;
+  durationMs?: number;
   mfe: number; // Max Favorable Excursion %
   mae: number; // Max Adverse Excursion %
+  entryOrderId?: string;
+  exitOrderId?: string;
 }
 
 export interface Order {
@@ -143,14 +172,32 @@ export interface Order {
   tradeId: string;
   timestamp: string;
   symbol: string;
-  type: 'MARKET' | 'LIMIT' | 'STOP_MARKET';
+  type: 'MARKET' | 'LIMIT' | 'STOP_MARKET' | 'STOP_LIMIT';
   side: 'BUY' | 'SELL';
   price: number;
   avgFillPrice: number;
   amount: number;
-  status: 'FILLED' | 'PARTIAL' | 'CANCELLED';
+  filledAmount?: number;
+  status: 'FILLED' | 'PARTIAL' | 'CANCELLED' | 'REJECTED';
   fee: number;
   slippage: number;
+  latencyMs?: number;
+  rejectionReason?: string;
+}
+
+export interface Position {
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  size: number;
+  notional: number;
+  entryPrice: number;
+  currentPrice: number;
+  leverage: number;
+  marginMode: 'CROSS' | 'ISOLATED';
+  initialMargin: number;
+  maintenanceMargin: number;
+  unrealizedPnl: number;
+  liquidationPrice: number;
 }
 
 export interface EquityPoint {
@@ -160,11 +207,16 @@ export interface EquityPoint {
   drawdownPct: number;
   pnl: number;
   cumulativePnl: number;
+  cashBalance?: number;
+  marginUtilization?: number;
+  netExposure?: number;
+  grossExposure?: number;
 }
 
 export interface PerformanceMetrics {
   totalReturn: number;
   annualizedReturn: number;
+  cagr?: number;
   benchmarkReturn: number;
   alpha: number;
   beta: number;
@@ -182,13 +234,19 @@ export interface PerformanceMetrics {
   avgWin: number;
   avgLoss: number;
   winLossRatio: number;
+  payoffRatio?: number;
   expectancy: number;
+  turnover?: number;
   totalFeesPaid: number;
   totalFundingPaid: number;
+  totalSlippagePaid?: number;
   recoveryFactor: number;
   dailyVolAnnualized: number;
   valueAtRisk95: number;
   expectedShortfall95: number;
+  exposureRatio?: number;
+  avgTradeDurationHours?: number;
+  maxConsecutiveLosses?: number;
 }
 
 export interface MonthlyReturn {
@@ -240,6 +298,8 @@ export interface OptimizationHeatmapCell {
   returnPct: number;
   maxDd: number;
   trades: number;
+  winRate?: number;
+  profitFactor?: number;
 }
 
 export interface MonteCarloPath {
@@ -247,6 +307,32 @@ export interface MonteCarloPath {
   points: { step: number; equity: number }[];
   finalReturn: number;
   maxDd: number;
+}
+
+export interface MonteCarloAnalysis {
+  paths: MonteCarloPath[];
+  percentiles: {
+    percentile: string;
+    finalEquity: number;
+    returnPct: number;
+    maxDd: number;
+  }[];
+  probabilityOfRuin: number; // % of paths that suffered >50% drawdown or liquidation
+  confidenceInterval95: [number, number];
+  medianSharpe: number;
+  simulatedPathsCount: number;
+}
+
+export interface WalkForwardWindow {
+  window: string;
+  inSampleRange: string;
+  outOfSampleRange: string;
+  inSampleReturn: number;
+  inSampleSharpe: number;
+  outOfSampleReturn: number;
+  outOfSampleSharpe: number;
+  wfe: number; // Walk Forward Efficiency % (OOS return / IS return)
+  robustnessStatus: 'ROBUST' | 'DEGRADED' | 'OVERFIT';
 }
 
 export interface RegimeAnalysis {
@@ -259,7 +345,23 @@ export interface RegimeAnalysis {
   avgPnl: number;
 }
 
+export interface ValidationWarning {
+  id: string;
+  type: 'LOOKAHEAD_BIAS' | 'CURVE_FITTING' | 'DATA_GAP' | 'UNREALISTIC_EXECUTION' | 'SMALL_SAMPLE_SIZE';
+  severity: 'INFO' | 'WARNING' | 'CRITICAL';
+  title: string;
+  message: string;
+  metricValue?: string;
+  recommendation: string;
+}
+
 export interface BacktestResult {
+  runId: string;
+  timestamp: string;
+  reproducibilityHash: string;
+  engineVersion: string;
+  isDeterministic: boolean;
+  dataset: DatasetMetadata;
   config: BacktestConfig;
   candles: CandleData[];
   trades: Trade[];
@@ -267,5 +369,25 @@ export interface BacktestResult {
   equityCurve: EquityPoint[];
   metrics: PerformanceMetrics;
   monthlyReturns: MonthlyReturn[];
+  validationWarnings: ValidationWarning[];
   logs: string[];
+}
+
+export interface BacktestRunRecord {
+  id: string;
+  name: string;
+  timestamp: string;
+  strategyId: string;
+  strategyName: string;
+  strategyVersion: string;
+  symbol: string;
+  timeframe: string;
+  dateRange: string;
+  reproducibilityHash: string;
+  datasetSource: string;
+  isSynthetic: boolean;
+  config: BacktestConfig;
+  metrics: PerformanceMetrics;
+  tradesCount: number;
+  result: BacktestResult;
 }

@@ -19,6 +19,9 @@ import {
   getPnlTextColor,
   getPnlBgColor,
 } from '../../utils/formatters';
+import { ResearchEngine } from '../../research/ResearchEngine';
+import { ExperimentRepository } from '../../persistence/ExperimentRepository';
+import { BacktestEngine } from '../../engine/BacktestEngine';
 import {
   Sliders,
   Play,
@@ -60,7 +63,7 @@ interface BacktestViewProps {
   onSelectTrade?: (trade: Trade) => void;
 }
 
-type BottomTab = 'trades' | 'orders' | 'metrics' | 'monthly' | 'risk' | 'logs';
+type BottomTab = 'trades' | 'orders' | 'metrics' | 'monthly' | 'risk' | 'logs' | 'validation';
 type ChartViewMode = 'candles' | 'equity' | 'drawdown' | 'split';
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -88,6 +91,92 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
   const [chartMode, setChartMode] = useState<ChartViewMode>('candles');
   const [tradeFilter, setTradeFilter] = useState<'ALL' | 'LONG' | 'SHORT' | 'WIN' | 'LOSS'>('ALL');
   const [selectedTradeModal, setSelectedTradeModal] = useState<Trade | null>(null);
+  const [savedToast, setSavedToast] = useState(false);
+
+  const runHash = BacktestEngine.generateRunHash(config);
+  const validationWarnings = ResearchEngine.evaluateValidation(config, candles, trades, equityCurve);
+
+  const handleExportCsv = () => {
+    const dummyResult = {
+      runId: `RUN-${runHash.slice(5, 11)}`,
+      timestamp: new Date().toISOString(),
+      reproducibilityHash: runHash,
+      engineVersion: 'ApexQuant Core v4.3.0',
+      isDeterministic: true,
+      dataset: {
+        id: 'synthetic-feed',
+        name: `${config.symbol} Synthetic Feed`,
+        source: 'DEMO_SYNTHETIC' as const,
+        providerName: 'ApexQuant Synthetic Feed',
+        symbol: config.symbol,
+        timeframe: config.timeframe,
+        dateRange: config.dateRange,
+        totalBars: candles.length,
+        missingBarsCount: 0,
+        duplicateCount: 0,
+        timezone: 'UTC',
+        version: '1.4.0',
+        isSynthetic: true,
+        validationStatus: 'PASSED' as const,
+      },
+      config,
+      candles,
+      trades,
+      orders,
+      equityCurve,
+      metrics,
+      monthlyReturns,
+      validationWarnings,
+      logs,
+    };
+    const csvContent = ExperimentRepository.exportTradesCsv(dummyResult);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `trades_${config.symbol.replace('/', '_')}_${runHash}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleSaveExperiment = () => {
+    const dummyResult = {
+      runId: `RUN-${runHash.slice(5, 11)}`,
+      timestamp: new Date().toISOString(),
+      reproducibilityHash: runHash,
+      engineVersion: 'ApexQuant Core v4.3.0',
+      isDeterministic: true,
+      dataset: {
+        id: 'synthetic-feed',
+        name: `${config.symbol} Synthetic Feed`,
+        source: 'DEMO_SYNTHETIC' as const,
+        providerName: 'ApexQuant Synthetic Feed',
+        symbol: config.symbol,
+        timeframe: config.timeframe,
+        dateRange: config.dateRange,
+        totalBars: candles.length,
+        missingBarsCount: 0,
+        duplicateCount: 0,
+        timezone: 'UTC',
+        version: '1.4.0',
+        isSynthetic: true,
+        validationStatus: 'PASSED' as const,
+      },
+      config,
+      candles,
+      trades,
+      orders,
+      equityCurve,
+      metrics,
+      monthlyReturns,
+      validationWarnings,
+      logs,
+    };
+    ExperimentRepository.saveRun(dummyResult);
+    setSavedToast(true);
+    setTimeout(() => setSavedToast(false), 2500);
+  };
 
   const filteredTrades = trades.filter((t) => {
     if (tradeFilter === 'LONG') return t.side === 'LONG';
@@ -443,7 +532,15 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
       <div className="flex-1 flex flex-col overflow-hidden bg-[#080b10]">
         {/* KPI Strip above chart */}
         <div className="px-3 py-1.5 border-b border-[#1a2333] bg-[#0b0f17] flex items-center justify-between text-xs font-mono-data overflow-x-auto">
-          <div className="flex items-center gap-4 shrink-0">
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="flex items-center gap-2 pr-3 border-r border-[#1a2333]">
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono-data font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/40">
+                DEMO / SYNTHETIC DATA
+              </span>
+              <span className="text-[10px] px-1 py-0.5 rounded bg-[#0f1522] border border-[#1e2739] text-emerald-400 font-mono-data hidden md:inline">
+                {runHash}
+              </span>
+            </div>
             <div className="flex items-center gap-1.5">
               <span className="text-slate-400 text-[11px]">NET RETURN:</span>
               <span className={`font-bold text-sm ${getPnlTextColor(metrics.totalReturn)}`}>
@@ -609,27 +706,62 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
                 <TerminalIcon className="w-3.5 h-3.5" />
                 <span>Engine Logs</span>
               </button>
+
+              <button
+                onClick={() => setActiveTab('validation')}
+                className={`px-3 py-2 border-b-2 font-medium transition-colors flex items-center gap-1.5 ${
+                  activeTab === 'validation'
+                    ? 'border-emerald-400 text-emerald-400 bg-[#131b29]'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span>Research Validation</span>
+                {validationWarnings.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-amber-500/20 text-amber-400 border border-amber-500/40 font-mono-data">
+                    {validationWarnings.length}
+                  </span>
+                )}
+              </button>
             </div>
 
-            {/* Quick Filters for Trades */}
-            {activeTab === 'trades' && (
-              <div className="flex items-center gap-1 text-[11px] font-mono-data">
-                <span className="text-slate-400 text-[10px]">Filter:</span>
-                {(['ALL', 'LONG', 'SHORT', 'WIN', 'LOSS'] as const).map((flt) => (
-                  <button
-                    key={flt}
-                    onClick={() => setTradeFilter(flt)}
-                    className={`px-1.5 py-0.5 rounded text-[10px] ${
-                      tradeFilter === flt
-                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {flt}
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* Quick Filters for Trades and Export/Save Actions */}
+            <div className="flex items-center gap-2">
+              {activeTab === 'trades' && (
+                <div className="flex items-center gap-1 text-[11px] font-mono-data mr-2">
+                  <span className="text-slate-400 text-[10px]">Filter:</span>
+                  {(['ALL', 'LONG', 'SHORT', 'WIN', 'LOSS'] as const).map((flt) => (
+                    <button
+                      key={flt}
+                      onClick={() => setTradeFilter(flt)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        tradeFilter === flt
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {flt}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <button
+                onClick={handleExportCsv}
+                className="flex items-center gap-1 px-2 py-1 rounded bg-[#0f1522] border border-[#1e2739] text-slate-300 hover:text-slate-100 hover:border-[#2d3a52] text-[11px] font-mono-data"
+                title="Export trades to CSV"
+              >
+                <Download className="w-3 h-3 text-slate-400" />
+                <span>Export CSV</span>
+              </button>
+              <button
+                onClick={handleSaveExperiment}
+                className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25 text-[11px] font-mono-data"
+                title="Save this backtest run"
+              >
+                <CheckCircle2 className="w-3 h-3" />
+                <span>{savedToast ? 'Saved!' : 'Save Run'}</span>
+              </button>
+            </div>
           </div>
 
           {/* Tab Content Panes */}
@@ -849,6 +981,65 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
                     </span>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* VALIDATION TAB */}
+            {activeTab === 'validation' && (
+              <div className="p-3 space-y-3 font-sans text-xs">
+                <div className="flex items-center justify-between pb-2 border-b border-[#1c2436]">
+                  <div>
+                    <h4 className="font-semibold text-slate-200 flex items-center gap-1.5">
+                      <Shield className="w-4 h-4 text-emerald-400" />
+                      Research Validation & Bias Audit Report
+                    </h4>
+                    <p className="text-[11px] text-slate-400">
+                      Evaluates statistical validity, sample sizes, execution realism, and survivorship/lookahead risks.
+                    </p>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-[#101725] border border-[#1e2739] text-slate-300 font-mono-data">
+                    Engine: ApexQuant Core v4.3.0
+                  </span>
+                </div>
+
+                {validationWarnings.length === 0 ? (
+                  <div className="p-4 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>All quantitative sanity checks passed. Sample size and execution parameters are within realistic bounds.</span>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {validationWarnings.map((w, idx) => (
+                      <div
+                        key={idx}
+                        className={`p-3 rounded border text-xs space-y-1.5 ${
+                          w.severity === 'CRITICAL'
+                            ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+                            : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-[11px] uppercase tracking-wider font-mono-data flex items-center gap-1">
+                            <AlertCircle className="w-3.5 h-3.5" />
+                            {w.title}
+                          </span>
+                          <span
+                            className={`text-[9px] px-1.5 py-0.2 rounded font-mono-data font-semibold ${
+                              w.severity === 'CRITICAL' ? 'bg-rose-500/20 text-rose-300' : 'bg-amber-500/20 text-amber-300'
+                            }`}
+                          >
+                            {w.severity}
+                          </span>
+                        </div>
+                        <div className="font-semibold text-slate-100">{w.message}</div>
+                        <div className="text-[11px] text-slate-300">
+                          <span className="text-slate-400 font-medium">Quant Recommendation: </span>
+                          {w.recommendation}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

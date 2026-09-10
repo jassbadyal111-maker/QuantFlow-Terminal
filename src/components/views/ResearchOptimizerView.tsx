@@ -4,8 +4,10 @@ import {
   SAMPLE_WALK_FORWARD,
   SAMPLE_REGIME_ANALYSIS,
   SAMPLE_MONTE_CARLO,
+  SAMPLE_TRADES,
 } from '../../data/mockQuantData';
 import { OptimizationHeatmapCell } from '../../types/backtest';
+import { ResearchEngine } from '../../research/ResearchEngine';
 import {
   Cpu,
   Flame,
@@ -26,6 +28,7 @@ export const ResearchOptimizerView: React.FC = () => {
   );
   const [optimizerType, setOptimizerType] = useState<'GRID' | 'BAYESIAN' | 'GENETIC'>('GRID');
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [monteCarloResults, setMonteCarloResults] = useState(SAMPLE_MONTE_CARLO);
 
   // Group heatmap cells by unique X (Lookback / Fast EMA) and Y (Stop Loss ATR Multiplier)
   const xValues = [10, 15, 21, 30, 50];
@@ -42,8 +45,10 @@ export const ResearchOptimizerView: React.FC = () => {
   const handleRunOptimizer = () => {
     setIsOptimizing(true);
     setTimeout(() => {
+      const mc = ResearchEngine.runMonteCarlo(SAMPLE_TRADES, 100000, 250);
+      setMonteCarloResults(mc.percentiles);
       setIsOptimizing(false);
-    }, 1200);
+    }, 600);
   };
 
   return (
@@ -59,6 +64,9 @@ export const ResearchOptimizerView: React.FC = () => {
               <h1 className="text-sm font-semibold text-slate-100">Quantitative Research & Strategy Optimizer</h1>
               <span className="text-[10px] font-mono-data px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/25">
                 CROSS-VALIDATION ACTIVE
+              </span>
+              <span className="text-[10px] font-mono-data px-1.5 py-0.5 rounded font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/40">
+                DEMO / SYNTHETIC DATA
               </span>
             </div>
             <p className="text-xs text-slate-400">
@@ -252,7 +260,7 @@ export const ResearchOptimizerView: React.FC = () => {
           </div>
 
           <div className="space-y-2">
-            {SAMPLE_MONTE_CARLO.map((mc) => (
+            {monteCarloResults.map((mc) => (
               <div
                 key={mc.percentile}
                 className="p-2 rounded bg-[#0e1420] border border-[#1c273a] flex items-center justify-between text-xs font-mono-data"

@@ -64,7 +64,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-slate-100">Quant Portfolio Terminal</h1>
             <span className="text-[10px] font-mono-data px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
-              LIVE SIMULATION
+              EVENT ENGINE v4.3.0
+            </span>
+            <span className="text-[10px] font-mono-data px-1.5 py-0.5 rounded font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/40">
+              DEMO / SYNTHETIC DATA
             </span>
           </div>
           <p className="text-xs text-slate-400">
