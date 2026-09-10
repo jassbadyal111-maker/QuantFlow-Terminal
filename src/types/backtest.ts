@@ -1,3 +1,5 @@
+import { ExecutionRecord, FundingEvent, LiquidationEvent, TradeLedgerEntry } from './marketData';
+
 export type NavView =
   | 'dashboard'
   | 'backtest'
@@ -125,6 +127,8 @@ export interface BacktestConfig {
     latencyMs: number;
     partialFillProbability?: number;
   };
+  sameBarExecutionPolicy?: 'NEXT_BAR' | 'OPEN' | 'CLOSE';
+  intrabarPolicy?: 'CONSERVATIVE' | 'OHLC_SEQUENCE' | 'TICK_DATA';
   dataset?: DatasetMetadata;
 }
 
@@ -217,12 +221,18 @@ export interface Position {
 
 export interface EquityPoint {
   time: string;
+  timestamp?: number;
   equity: number;
   benchmarkEquity: number;
   drawdownPct: number;
   pnl: number;
   cumulativePnl: number;
   cashBalance?: number;
+  positionNotional?: number;
+  unrealizedPnl?: number;
+  realizedPnl?: number;
+  cumulativeFees?: number;
+  cumulativeFunding?: number;
   marginUtilization?: number;
   netExposure?: number;
   grossExposure?: number;
@@ -386,6 +396,12 @@ export interface BacktestResult {
   monthlyReturns: MonthlyReturn[];
   validationWarnings: ValidationWarning[];
   logs: string[];
+  executionRecords?: ExecutionRecord[];
+  fundingEvents?: FundingEvent[];
+  liquidationEvents?: LiquidationEvent[];
+  tradeLedger?: TradeLedgerEntry[];
+  invariantsPassed?: boolean;
+  invariantCheckErrors?: string[];
 }
 
 export interface BacktestRunRecord {

@@ -4,6 +4,7 @@ import {
   CandleData,
   Order,
   Trade,
+  EquityPoint,
 } from '../types/backtest';
 import { MarketDataProvider, MockMarketDataProvider } from '../data/MarketDataProvider';
 import { DataValidator } from '../data/validation/DataValidator';
@@ -13,7 +14,8 @@ import { PortfolioManager } from '../portfolio/PortfolioManager';
 import { AnalyticsEngine } from '../analytics/AnalyticsEngine';
 import { ResearchEngine } from '../research/ResearchEngine';
 import { DatasetMetadata, ValidationReport } from '../types/dataset';
-import { MarketDataError } from '../types/marketData';
+import { ExecutionRecord, FundingEvent, LiquidationEvent, MarketDataError } from '../types/marketData';
+import { TradeLedger } from '../ledger/TradeLedger';
 
 export class BacktestEngine {
   public static readonly ENGINE_VERSION = 'ApexQuant Core v4.3.0-prod';
@@ -37,8 +39,6 @@ export class BacktestEngine {
 
   /**
    * Deterministic Hash for Run Reproducibility
-   * Integrates engine version, strategy version, params, exchange, market, symbol, timeframe,
-   * dataset checksum/seed, initial capital, leverage, margin, fees, and slippage.
    */
   public static generateRunHash(
     config: BacktestConfig,
@@ -76,7 +76,7 @@ export class BacktestEngine {
   }
 
   /**
-   * Core event-driven simulation loop executed against validated candles and dataset metadata
+   * Core deterministic, institutional-grade simulation loop
    */
   public runSimulation(
     rawCandles: CandleData[],
@@ -93,8 +93,11 @@ export class BacktestEngine {
     logs.push(`[EXECUTION] Maker: ${this.config.execution.makerFeeBps} bps | Taker: ${this.config.execution.takerFeeBps} bps | Slippage: ${this.config.execution.slippageBps} bps`);
 
     // 1. DATA LAYER AUDIT & VALIDATION
-    onProgress?.(15, 'Validating historical dataset integrity...');
-    const validation: ValidationReport = DataValidator.validate(rawCandles, this.config.timeframe);
+    onProgress?.(15, 'Auditing historical dataset integrity & range coverage...');
+    const validation: ValidationReport = DataValidator.validate(rawCandles, this.config.timeframe, {
+      requestedStart: this.config.dateRange.start,
+      requestedEnd: this.config.dateRange.end,
+    });
 
     logs.push(`[DATA] Dataset: ${datasetMetadata.name || datasetMetadata.symbol} (${rawCandles.length} bars, Source: ${datasetMetadata.source})`);
     logs.push(`[DATA] Range: ${datasetMetadata.startTime || rawCandles[0]?.time} → ${datasetMetadata.endTime || rawCandles[rawCandles.length - 1]?.time}`);
@@ -104,7 +107,7 @@ export class BacktestEngine {
       validation.errors.forEach((err) => logs.push(`[VALIDATION-ERROR] ${err}`));
       throw new MarketDataError(
         'INVALID_DATA',
-        `Backtest blocked due to ${validation.errors.length} critical data integrity violations in dataset: ${validation.errors[0]}`
+        `Backtest blocked due to ${validation.errors.length} critical data integrity violations: ${validation.errors[0]}`
       );
     }
 
@@ -115,8 +118,8 @@ export class BacktestEngine {
       logs.push(`[VALIDATION] Dataset verified: 100% OHLC continuity, timestamps strictly chronological.`);
     }
 
-    // 2. STRATEGY SELECTION & INDICATOR PREPARATION
-    onProgress?.(35, 'Initializing quantitative strategy and indicators...');
+    // 2. STRATEGY INITIALIZATION
+    onProgress?.(30, 'Initializing quantitative strategy and indicators...');
     const strategy: QuantitativeStrategy =
       STRATEGY_REGISTRY[this.config.strategyId] || new EmaCrossoverStrategy();
 
@@ -131,15 +134,21 @@ export class BacktestEngine {
 
     const candles = strategy.prepare(rawCandles, activeParams);
 
-    // 3. EXECUTION & PORTFOLIO ENGINE SETUP
+    // 3. EXECUTION, PORTFOLIO & AUDIT LEDGER SETUP
     const execution = new ExecutionSimulator(this.config);
     const portfolio = new PortfolioManager(this.config);
+    const ledger = new TradeLedger(this.config.initialCapital, candles[0].time, candles[0].timestamp);
     const orders: Order[] = [];
+    const fundingEvents: FundingEvent[] = [];
+    const liquidationEvents: LiquidationEvent[] = [];
+    const equityCurve: EquityPoint[] = [];
+
     let tradeCounter = 1000;
     let activeTradeMetadata: {
       tradeId: string;
       entryBarIndex: number;
       entryTime: string;
+      entryExecutionId?: string;
       stopLossPrice?: number;
       takeProfitPrice?: number;
       trailingStopAtr?: number;
@@ -148,43 +157,91 @@ export class BacktestEngine {
     } | null = null;
 
     const startBenchmarkPrice = candles[0]?.close || 1;
+    const fundingRate8h = (this.config.execution.fundingRate8hBps ?? 1.0) / 10000;
+    const FUNDING_INTERVAL_MS = 8 * 3600 * 1000;
 
-    onProgress?.(55, 'Executing bar-by-bar matching engine & risk policies...');
+    onProgress?.(50, 'Executing deterministic bar-by-bar matching & risk engine...');
 
     // 4. EVENT-DRIVEN BAR-BY-BAR LOOP
     for (let i = 0; i < candles.length; i++) {
       const bar = candles[i];
-      const currentPos = portfolio.getPosition(this.config.symbol);
+      const prevBar = i > 0 ? candles[i - 1] : null;
+      let currentPos = portfolio.getPosition(this.config.symbol);
 
-      // A. Check Liquidation on current bar
+      // A. Periodic 8-Hour Funding Settlement Check
+      if (currentPos && prevBar) {
+        const prevEpoch = Math.floor(prevBar.timestamp / FUNDING_INTERVAL_MS);
+        const currEpoch = Math.floor(bar.timestamp / FUNDING_INTERVAL_MS);
+
+        if (currEpoch > prevEpoch) {
+          const intervalsPassed = currEpoch - prevEpoch;
+          for (let ep = 0; ep < intervalsPassed; ep++) {
+            const fundingTs = (prevEpoch + ep + 1) * FUNDING_INTERVAL_MS;
+            // Long pays when funding > 0; short receives
+            const multiplier = currentPos.side === 'LONG' ? 1 : -1;
+            const payment = Number((currentPos.notional * fundingRate8h * multiplier).toFixed(2));
+
+            const cashBefore = portfolio.getCash();
+            portfolio.applyFundingPayment(payment);
+            const cashAfter = portfolio.getCash();
+
+            const fundingEvent: FundingEvent = {
+              timestamp: fundingTs,
+              time: new Date(fundingTs).toISOString().slice(0, 16).replace('T', ' '),
+              symbol: currentPos.symbol,
+              rate: fundingRate8h,
+              markPrice: bar.close,
+              intervalHours: 8,
+              positionNotional: currentPos.notional,
+              payment,
+              side: currentPos.side,
+              cashBefore,
+              cashAfter,
+            };
+            fundingEvents.push(fundingEvent);
+
+            ledger.recordCashTx(
+              fundingTs,
+              bar.time,
+              'FUNDING',
+              -payment,
+              cashAfter,
+              `8h Funding settlement: ${payment > 0 ? 'Paid' : 'Received'} $${Math.abs(payment)}`
+            );
+
+            logs.push(`[FUNDING] 8h epoch settlement @ ${fundingEvent.time}: ${payment > 0 ? 'Paid' : 'Received'} $${Math.abs(payment)}`);
+          }
+        }
+      }
+
+      // B. Mark-to-Market & Liquidation Check
       if (currentPos) {
         const { liquidated, liquidationReason } = portfolio.updateBar(bar, this.config.symbol);
         if (liquidated) {
-          const liqFill = execution.fillMarketOrder(
-            bar,
-            currentPos.side === 'LONG' ? 'SELL' : 'BUY',
-            currentPos.notional,
-            activeTradeMetadata?.tradeId || `TRD-${tradeCounter}`
-          );
-          orders.push(liqFill.order);
-
-          const closedTrade = portfolio.closePosition(
+          const liqResult = portfolio.forceLiquidate(
             this.config.symbol,
-            currentPos.liquidationPrice,
-            bar.time,
-            liqFill.feePaid,
-            liqFill.slippagePaid,
-            0,
-            'LIQUIDATION',
-            i - (activeTradeMetadata?.entryBarIndex || i),
-            0,
-            -100,
+            bar,
             activeTradeMetadata?.tradeId || `TRD-${tradeCounter}`
           );
 
-          if (closedTrade) {
+          if (liqResult) {
+            liquidationEvents.push(liqResult.liquidationEvent);
+            ledger.recordTrade(
+              liqResult.trade,
+              activeTradeMetadata?.entryExecutionId ? [activeTradeMetadata.entryExecutionId] : [],
+              []
+            );
+            ledger.recordCashTx(
+              bar.timestamp,
+              bar.time,
+              'LIQUIDATION',
+              liqResult.trade.netPnl,
+              portfolio.getCash(),
+              `Forced liquidation: ${liqResult.liquidationEvent.reason}`
+            );
+
             bar.marker = {
-              id: `marker-${closedTrade.id}`,
+              id: `marker-${liqResult.trade.id}`,
               time: bar.time,
               position: currentPos.side === 'LONG' ? 'belowBar' : 'aboveBar',
               color: '#f43f5e',
@@ -192,129 +249,136 @@ export class BacktestEngine {
               text: 'LIQUIDATION',
               price: currentPos.liquidationPrice,
               side: 'EXIT',
-              pnl: closedTrade.netPnl,
+              pnl: liqResult.trade.netPnl,
             };
-          }
 
-          logs.push(`[RISK] LIQUIDATION triggered @ Bar ${i} (${bar.time}): ${liquidationReason}`);
-          activeTradeMetadata = null;
-          continue;
-        }
-
-        // B. Excursions & Trailing Stop Updates
-        if (activeTradeMetadata) {
-          if (bar.high > activeTradeMetadata.highestPriceSinceEntry) {
-            activeTradeMetadata.highestPriceSinceEntry = bar.high;
-          }
-          if (bar.low < activeTradeMetadata.lowestPriceSinceEntry) {
-            activeTradeMetadata.lowestPriceSinceEntry = bar.low;
-          }
-
-          // Dynamic Trailing Stop Adjustment
-          if (activeTradeMetadata.trailingStopAtr && bar.atr) {
-            const trailDist = bar.atr * activeTradeMetadata.trailingStopAtr;
-            if (currentPos.side === 'LONG') {
-              const newSl = Number((bar.close - trailDist).toFixed(2));
-              if (!activeTradeMetadata.stopLossPrice || newSl > activeTradeMetadata.stopLossPrice) {
-                activeTradeMetadata.stopLossPrice = newSl;
-              }
-            } else {
-              const newSl = Number((bar.close + trailDist).toFixed(2));
-              if (!activeTradeMetadata.stopLossPrice || newSl < activeTradeMetadata.stopLossPrice) {
-                activeTradeMetadata.stopLossPrice = newSl;
-              }
-            }
-          }
-
-          // C. Stop Loss & Take Profit Trigger Checks
-          let shouldExit = false;
-          let exitPrice = bar.close;
-          let exitReason: Trade['exitReason'] = 'SIGNAL_REVERSAL';
-
-          if (currentPos.side === 'LONG') {
-            if (activeTradeMetadata.stopLossPrice && bar.low <= activeTradeMetadata.stopLossPrice) {
-              shouldExit = true;
-              exitPrice = activeTradeMetadata.stopLossPrice;
-              exitReason = 'STOP_LOSS';
-            } else if (activeTradeMetadata.takeProfitPrice && bar.high >= activeTradeMetadata.takeProfitPrice) {
-              shouldExit = true;
-              exitPrice = activeTradeMetadata.takeProfitPrice;
-              exitReason = 'TAKE_PROFIT';
-            }
-          } else {
-            if (activeTradeMetadata.stopLossPrice && bar.high >= activeTradeMetadata.stopLossPrice) {
-              shouldExit = true;
-              exitPrice = activeTradeMetadata.stopLossPrice;
-              exitReason = 'STOP_LOSS';
-            } else if (activeTradeMetadata.takeProfitPrice && bar.low <= activeTradeMetadata.takeProfitPrice) {
-              shouldExit = true;
-              exitPrice = activeTradeMetadata.takeProfitPrice;
-              exitReason = 'TAKE_PROFIT';
-            }
-          }
-
-          if (shouldExit) {
-            const exitFill = execution.fillMarketOrder(
-              { ...bar, close: exitPrice },
-              currentPos.side === 'LONG' ? 'SELL' : 'BUY',
-              currentPos.notional,
-              activeTradeMetadata.tradeId
-            );
-            orders.push(exitFill.order);
-
-            const durationBars = i - activeTradeMetadata.entryBarIndex;
-            const funding = execution.calculateFundingPayment(
-              currentPos.notional,
-              currentPos.side,
-              durationBars,
-              this.config.timeframe
-            );
-
-            const mfe = currentPos.side === 'LONG'
-              ? ((activeTradeMetadata.highestPriceSinceEntry - currentPos.entryPrice) / currentPos.entryPrice) * 100
-              : ((currentPos.entryPrice - activeTradeMetadata.lowestPriceSinceEntry) / currentPos.entryPrice) * 100;
-
-            const mae = currentPos.side === 'LONG'
-              ? ((activeTradeMetadata.lowestPriceSinceEntry - currentPos.entryPrice) / currentPos.entryPrice) * 100
-              : ((currentPos.entryPrice - activeTradeMetadata.highestPriceSinceEntry) / currentPos.entryPrice) * 100;
-
-            const closedTrade = portfolio.closePosition(
-              this.config.symbol,
-              exitPrice,
-              bar.time,
-              exitFill.feePaid,
-              exitFill.slippagePaid,
-              funding,
-              exitReason,
-              durationBars,
-              mfe,
-              mae,
-              activeTradeMetadata.tradeId
-            );
-
-            if (closedTrade) {
-              closedTrade.timestamp = activeTradeMetadata.entryTime;
-              bar.marker = {
-                id: `marker-${closedTrade.id}`,
-                time: bar.time,
-                position: currentPos.side === 'LONG' ? 'aboveBar' : 'belowBar',
-                color: closedTrade.netPnl >= 0 ? '#10b981' : '#f43f5e',
-                shape: 'circle',
-                text: `${exitReason.replace('_', ' ')} (${closedTrade.netPnl >= 0 ? '+' : ''}$${closedTrade.netPnl})`,
-                price: exitPrice,
-                side: 'EXIT',
-                pnl: closedTrade.netPnl,
-              };
-              logs.push(`[FILL] Trade ${closedTrade.id} closed @ $${exitPrice} via ${exitReason}. Net P&L: $${closedTrade.netPnl}`);
-            }
-
+            logs.push(`[RISK] LIQUIDATION triggered @ Bar ${i} (${bar.time}): ${liquidationReason}`);
             activeTradeMetadata = null;
-            continue;
+            currentPos = null;
           }
         }
       }
 
-      // D. Generate Strategy Signal
+      // C. Active Position Stops / Trailing Stops / Excursions
+      if (currentPos && activeTradeMetadata) {
+        if (bar.high > activeTradeMetadata.highestPriceSinceEntry) {
+          activeTradeMetadata.highestPriceSinceEntry = bar.high;
+        }
+        if (bar.low < activeTradeMetadata.lowestPriceSinceEntry) {
+          activeTradeMetadata.lowestPriceSinceEntry = bar.low;
+        }
+
+        // Dynamic Trailing Stop Adjustment
+        if (activeTradeMetadata.trailingStopAtr && bar.atr) {
+          const trailDist = bar.atr * activeTradeMetadata.trailingStopAtr;
+          if (currentPos.side === 'LONG') {
+            const newSl = Number((bar.close - trailDist).toFixed(2));
+            if (!activeTradeMetadata.stopLossPrice || newSl > activeTradeMetadata.stopLossPrice) {
+              activeTradeMetadata.stopLossPrice = newSl;
+            }
+          } else {
+            const newSl = Number((bar.close + trailDist).toFixed(2));
+            if (!activeTradeMetadata.stopLossPrice || newSl < activeTradeMetadata.stopLossPrice) {
+              activeTradeMetadata.stopLossPrice = newSl;
+            }
+          }
+        }
+
+        // Stop Loss & Take Profit Trigger Checks
+        let shouldExit = false;
+        let exitPrice = bar.close;
+        let exitReason: Trade['exitReason'] = 'SIGNAL_REVERSAL';
+
+        if (currentPos.side === 'LONG') {
+          if (activeTradeMetadata.stopLossPrice && bar.low <= activeTradeMetadata.stopLossPrice) {
+            shouldExit = true;
+            exitPrice = activeTradeMetadata.stopLossPrice;
+            exitReason = 'STOP_LOSS';
+          } else if (activeTradeMetadata.takeProfitPrice && bar.high >= activeTradeMetadata.takeProfitPrice) {
+            shouldExit = true;
+            exitPrice = activeTradeMetadata.takeProfitPrice;
+            exitReason = 'TAKE_PROFIT';
+          }
+        } else {
+          if (activeTradeMetadata.stopLossPrice && bar.high >= activeTradeMetadata.stopLossPrice) {
+            shouldExit = true;
+            exitPrice = activeTradeMetadata.stopLossPrice;
+            exitReason = 'STOP_LOSS';
+          } else if (activeTradeMetadata.takeProfitPrice && bar.low <= activeTradeMetadata.takeProfitPrice) {
+            shouldExit = true;
+            exitPrice = activeTradeMetadata.takeProfitPrice;
+            exitReason = 'TAKE_PROFIT';
+          }
+        }
+
+        if (shouldExit) {
+          const exitFill = execution.fillMarketOrder(
+            { ...bar, close: exitPrice },
+            currentPos.side === 'LONG' ? 'SELL' : 'BUY',
+            currentPos.notional,
+            activeTradeMetadata.tradeId
+          );
+          orders.push(exitFill.order);
+
+          const durationBars = i - activeTradeMetadata.entryBarIndex;
+          const mfe = currentPos.side === 'LONG'
+            ? ((activeTradeMetadata.highestPriceSinceEntry - currentPos.entryPrice) / currentPos.entryPrice) * 100
+            : ((currentPos.entryPrice - activeTradeMetadata.lowestPriceSinceEntry) / currentPos.entryPrice) * 100;
+
+          const mae = currentPos.side === 'LONG'
+            ? ((activeTradeMetadata.lowestPriceSinceEntry - currentPos.entryPrice) / currentPos.entryPrice) * 100
+            : ((currentPos.entryPrice - activeTradeMetadata.highestPriceSinceEntry) / currentPos.entryPrice) * 100;
+
+          const closedTrade = portfolio.closePosition(
+            this.config.symbol,
+            exitPrice,
+            bar.time,
+            exitFill.feePaid,
+            exitFill.slippagePaid,
+            0,
+            exitReason,
+            durationBars,
+            mfe,
+            mae,
+            activeTradeMetadata.tradeId
+          );
+
+          if (closedTrade) {
+            closedTrade.timestamp = activeTradeMetadata.entryTime;
+            ledger.recordTrade(
+              closedTrade,
+              activeTradeMetadata.entryExecutionId ? [activeTradeMetadata.entryExecutionId] : [],
+              [exitFill.executionRecord.executionId]
+            );
+            ledger.recordCashTx(
+              bar.timestamp,
+              bar.time,
+              'REALIZED_PNL',
+              closedTrade.netPnl,
+              portfolio.getCash(),
+              `Realized PnL via ${closedTrade.exitReason}: $${closedTrade.netPnl}`
+            );
+
+            bar.marker = {
+              id: `marker-${closedTrade.id}`,
+              time: bar.time,
+              position: currentPos.side === 'LONG' ? 'aboveBar' : 'belowBar',
+              color: closedTrade.netPnl >= 0 ? '#10b981' : '#f43f5e',
+              shape: 'circle',
+              text: `${exitReason.replace('_', ' ')} (${closedTrade.netPnl >= 0 ? '+' : ''}$${closedTrade.netPnl})`,
+              price: exitPrice,
+              side: 'EXIT',
+              pnl: closedTrade.netPnl,
+            };
+            logs.push(`[FILL] Trade ${closedTrade.id} closed @ $${exitPrice} via ${exitReason}. Net P&L: $${closedTrade.netPnl}`);
+          }
+
+          activeTradeMetadata = null;
+          currentPos = null;
+        }
+      }
+
+      // D. Strategy Signal Generation
       const signal = strategy.onBar(
         i,
         candles,
@@ -330,65 +394,73 @@ export class BacktestEngine {
         activeParams
       );
 
-      // E. Execute Strategy Signal
-      if (signal.action === 'BUY' || signal.action === 'SELL') {
-        if (!currentPos) {
-          const side = signal.side || (signal.action === 'BUY' ? 'LONG' : 'SHORT');
-          const tradeId = `TRD-${++tradeCounter}`;
+      // E. Execute Strategy Signals
+      if ((signal.action === 'BUY' || signal.action === 'SELL') && !currentPos) {
+        const side = signal.side || (signal.action === 'BUY' ? 'LONG' : 'SHORT');
+        const tradeId = `TRD-${++tradeCounter}`;
 
-          // Position Sizing calculation
-          const sizing = this.config.positionSizing;
-          let notionalUsd = 25000;
-          if (sizing.type === 'percent_equity') {
-            notionalUsd = portfolio.getCash() * (sizing.value / 100) * this.config.leverage;
-          } else {
-            notionalUsd = sizing.value * this.config.leverage;
-          }
+        // Position Sizing
+        const sizing = this.config.positionSizing;
+        let notionalUsd = 25000;
+        if (sizing.type === 'percent_equity') {
+          notionalUsd = portfolio.getCash() * (sizing.value / 100) * this.config.leverage;
+        } else {
+          notionalUsd = sizing.value * this.config.leverage;
+        }
 
-          // Pre-Trade Margin Check
-          const requiredMargin = notionalUsd / this.config.leverage;
-          if (requiredMargin <= portfolio.getCash()) {
-            const fill = execution.fillMarketOrder(
-              bar,
-              side === 'LONG' ? 'BUY' : 'SELL',
-              notionalUsd,
-              tradeId
-            );
-            orders.push(fill.order);
+        // Pre-Trade Margin Check
+        const requiredMargin = notionalUsd / this.config.leverage;
+        if (requiredMargin <= portfolio.getCash()) {
+          const fill = execution.fillMarketOrder(
+            bar,
+            side === 'LONG' ? 'BUY' : 'SELL',
+            notionalUsd,
+            tradeId
+          );
+          orders.push(fill.order);
 
-            portfolio.openPosition(
-              this.config.symbol,
-              side,
-              fill.order.amount,
-              fill.fillPrice,
-              fill.feePaid,
-              fill.slippagePaid
-            );
+          portfolio.openPosition(
+            this.config.symbol,
+            side,
+            fill.order.amount,
+            fill.fillPrice,
+            fill.feePaid,
+            fill.slippagePaid
+          );
 
-            activeTradeMetadata = {
-              tradeId,
-              entryBarIndex: i,
-              entryTime: bar.time,
-              stopLossPrice: signal.stopLossPrice,
-              takeProfitPrice: signal.takeProfitPrice,
-              trailingStopAtr: signal.trailingStopAtr,
-              highestPriceSinceEntry: fill.fillPrice,
-              lowestPriceSinceEntry: fill.fillPrice,
-            };
+          activeTradeMetadata = {
+            tradeId,
+            entryBarIndex: i,
+            entryTime: bar.time,
+            entryExecutionId: fill.executionRecord.executionId,
+            stopLossPrice: signal.stopLossPrice,
+            takeProfitPrice: signal.takeProfitPrice,
+            trailingStopAtr: signal.trailingStopAtr,
+            highestPriceSinceEntry: fill.fillPrice,
+            lowestPriceSinceEntry: fill.fillPrice,
+          };
 
-            bar.marker = {
-              id: `marker-${tradeId}`,
-              time: bar.time,
-              position: side === 'LONG' ? 'belowBar' : 'aboveBar',
-              color: side === 'LONG' ? '#10b981' : '#38bdf8',
-              shape: side === 'LONG' ? 'arrowUp' : 'arrowDown',
-              text: `${side} @ $${fill.fillPrice}`,
-              price: fill.fillPrice,
-              side: side === 'LONG' ? 'BUY' : 'SELL',
-            };
+          ledger.recordCashTx(
+            bar.timestamp,
+            bar.time,
+            'ORDER_FEE',
+            -fill.feePaid,
+            portfolio.getCash(),
+            `Fee paid for order ${fill.order.id}: $${fill.feePaid}`
+          );
 
-            logs.push(`[ORDER] Signal: ${signal.action} ${side} submitted | [FILL] Executed @ $${fill.fillPrice} (Fee: $${fill.feePaid})`);
-          }
+          bar.marker = {
+            id: `marker-${tradeId}`,
+            time: bar.time,
+            position: side === 'LONG' ? 'belowBar' : 'aboveBar',
+            color: side === 'LONG' ? '#10b981' : '#38bdf8',
+            shape: side === 'LONG' ? 'arrowUp' : 'arrowDown',
+            text: `${side} @ $${fill.fillPrice}`,
+            price: fill.fillPrice,
+            side: side === 'LONG' ? 'BUY' : 'SELL',
+          };
+
+          logs.push(`[ORDER] Signal: ${signal.action} ${side} | Executed @ $${fill.fillPrice} (Fee: $${fill.feePaid})`);
         }
       } else if (signal.action === 'CLOSE' && currentPos && activeTradeMetadata) {
         const exitFill = execution.fillMarketOrder(
@@ -400,13 +472,6 @@ export class BacktestEngine {
         orders.push(exitFill.order);
 
         const durationBars = i - activeTradeMetadata.entryBarIndex;
-        const funding = execution.calculateFundingPayment(
-          currentPos.notional,
-          currentPos.side,
-          durationBars,
-          this.config.timeframe
-        );
-
         const mfe = currentPos.side === 'LONG'
           ? ((activeTradeMetadata.highestPriceSinceEntry - currentPos.entryPrice) / currentPos.entryPrice) * 100
           : ((currentPos.entryPrice - activeTradeMetadata.lowestPriceSinceEntry) / currentPos.entryPrice) * 100;
@@ -421,7 +486,7 @@ export class BacktestEngine {
           bar.time,
           exitFill.feePaid,
           exitFill.slippagePaid,
-          funding,
+          0,
           'SIGNAL_REVERSAL',
           durationBars,
           mfe,
@@ -431,6 +496,20 @@ export class BacktestEngine {
 
         if (closedTrade) {
           closedTrade.timestamp = activeTradeMetadata.entryTime;
+          ledger.recordTrade(
+            closedTrade,
+            activeTradeMetadata.entryExecutionId ? [activeTradeMetadata.entryExecutionId] : [],
+            [exitFill.executionRecord.executionId]
+          );
+          ledger.recordCashTx(
+            bar.timestamp,
+            bar.time,
+            'REALIZED_PNL',
+            closedTrade.netPnl,
+            portfolio.getCash(),
+            `Realized PnL via SIGNAL_REVERSAL: $${closedTrade.netPnl}`
+          );
+
           bar.marker = {
             id: `marker-${closedTrade.id}`,
             time: bar.time,
@@ -447,19 +526,34 @@ export class BacktestEngine {
 
         activeTradeMetadata = null;
       }
+
+      // F. Capture Instantaneous Equity Point at Every Bar
+      const currentPoint = portfolio.getSnapshot(bar.time, bar.close, startBenchmarkPrice, bar.timestamp);
+      equityCurve.push(currentPoint);
     }
 
-    onProgress?.(80, 'Generating equity curve, risk statistics, and audit reports...');
-
-    // 5. BUILD COMPLETE EQUITY CURVE (Benchmark calculated strictly from this exact dataset)
-    const equityCurve = candles.map((c) => {
-      const snap = portfolio.getSnapshot(c.time, c.close, startBenchmarkPrice);
-      return snap;
-    });
+    onProgress?.(80, 'Generating risk metrics, ledger audit, and research checks...');
 
     const trades = portfolio.getClosedTrades();
+    const finalPoint = equityCurve[equityCurve.length - 1];
+    const finalEquity = finalPoint?.equity ?? this.config.initialCapital;
+    const finalPos = portfolio.getPosition(this.config.symbol);
 
-    // 6. METRICS & MONTHLY RETURNS CALCULATION
+    // Accounting Invariants Verification
+    const invariantCheck = ledger.verifyInvariants(
+      this.config.initialCapital,
+      portfolio.getCash(),
+      finalEquity,
+      finalPos ? finalPos.unrealizedPnl : 0
+    );
+
+    if (invariantCheck.passed) {
+      logs.push(`[LEDGER] Accounting invariants verified: Equity == Cash + UnrealizedPnL, Cash balance reconciled.`);
+    } else {
+      invariantCheck.errors.forEach((err) => logs.push(`[LEDGER-ERROR] ${err}`));
+    }
+
+    // Performance Metrics Calculation
     const metrics = AnalyticsEngine.calculateMetrics(
       equityCurve,
       trades,
@@ -471,7 +565,7 @@ export class BacktestEngine {
 
     const monthlyReturns = AnalyticsEngine.calculateMonthlyReturns(equityCurve);
 
-    // 7. RESEARCH VALIDATION CHECKS
+    // Research Validation Checks
     const validationWarnings = ResearchEngine.evaluateValidation(
       this.config,
       candles,
@@ -487,8 +581,8 @@ export class BacktestEngine {
     );
     const runId = `RUN-${reproducibilityHash.slice(5, 11)}-${Date.now().toString().slice(-4)}`;
 
-    logs.push(`[ANALYTICS] Metrics calculated: Return: ${metrics.totalReturn}% | Sharpe: ${metrics.sharpeRatio} | MaxDD: ${metrics.maxDrawdown}%`);
-    logs.push(`[COMPLETE] Run ${runId} finalized successfully. Total Trades: ${trades.length}`);
+    logs.push(`[ANALYTICS] Finalized: Total Return: ${metrics.totalReturn}% | Sharpe: ${metrics.sharpeRatio} | MaxDD: ${metrics.maxDrawdown}%`);
+    logs.push(`[COMPLETE] Run ${runId} finalized successfully. Total Trades: ${trades.length} | Audit Records: ${execution.getExecutionRecords().length}`);
 
     onProgress?.(100, 'Backtest simulation complete.');
 
@@ -508,6 +602,12 @@ export class BacktestEngine {
       monthlyReturns,
       validationWarnings,
       logs,
+      executionRecords: execution.getExecutionRecords(),
+      fundingEvents,
+      liquidationEvents,
+      tradeLedger: ledger.getEntries(),
+      invariantsPassed: invariantCheck.passed,
+      invariantCheckErrors: invariantCheck.errors,
     };
   }
 
@@ -546,7 +646,7 @@ export class BacktestEngine {
 
     onProgress?.(10, `Connecting to ${this.dataProvider.name}...`);
 
-    // Fetch candles from configured provider - WILL THROW if provider fails, no silent fallback
+    // Fetch candles from configured provider - will throw if incomplete or invalid, no silent fallback
     const res = await this.dataProvider.getCandles(
       this.config.symbol,
       this.config.timeframe,

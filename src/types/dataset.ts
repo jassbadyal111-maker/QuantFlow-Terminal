@@ -1,4 +1,5 @@
 import { BacktestConfig, CandleData, EquityPoint, Order, PerformanceMetrics, Trade } from './backtest';
+import { ExecutionRecord, FundingEvent, LiquidationEvent, TradeLedgerEntry } from './marketData';
 
 export type ExchangeId = 'BINANCE' | 'BYBIT' | 'MOCK';
 export type MarketType = 'PERPETUAL' | 'SPOT';
@@ -11,9 +12,14 @@ export interface DatasetMetadata {
   marketType?: MarketType;
   symbol: string;
   timeframe: string;
+  requestedStart?: string;
+  requestedEnd?: string;
+  actualStart?: string;
+  actualEnd?: string;
   startTime?: string;
   endTime?: string;
   rowCount?: number;
+  expectedRowCount?: number;
   source: 'EXCHANGE_API' | 'DEMO_SYNTHETIC' | 'LOCAL_CACHE';
   providerName: string;
   downloadedAt?: string;
@@ -54,6 +60,8 @@ export interface ValidationStatistics {
   expectedIntervalMinutes: number;
   abnormalGapsCount: number;
   invalidOhlcCount: number;
+  expectedRowCount?: number;
+  actualRowCount?: number;
 }
 
 export interface ValidationReport {
@@ -72,6 +80,8 @@ export interface ExecutionAssumptions {
   latencyMs: number;
   partialFillRatio: number;
   fundingMode: 'HISTORICAL' | 'SIMULATED' | 'IGNORED';
+  sameBarExecutionPolicy?: 'NEXT_BAR' | 'OPEN' | 'CLOSE';
+  intrabarPolicy?: 'CONSERVATIVE' | 'OHLC_SEQUENCE' | 'TICK_DATA';
 }
 
 export interface BacktestSnapshot {
@@ -89,4 +99,8 @@ export interface BacktestSnapshot {
   validationReport: ValidationReport;
   executionAssumptions: ExecutionAssumptions;
   reproducibilityHash: string;
+  executionRecords?: ExecutionRecord[];
+  fundingEvents?: FundingEvent[];
+  liquidationEvents?: LiquidationEvent[];
+  tradeLedger?: TradeLedgerEntry[];
 }

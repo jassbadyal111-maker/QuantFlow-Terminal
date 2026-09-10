@@ -32,9 +32,8 @@ export class MockProvider {
   ): Promise<{ candles: CandleData[]; metadata: DatasetMetadata }> {
     const seed = options?.seed ?? 20250228;
     const rng = createRng(seed);
-    const barCount = options?.count ?? 180;
 
-    let basePrice = 64200;
+    let basePrice = 50000;
     if (symbol.includes('ETH')) basePrice = 2850;
     else if (symbol.includes('SOL')) basePrice = 175;
     else if (symbol.includes('AVAX')) basePrice = 32;
@@ -42,8 +41,21 @@ export class MockProvider {
 
     const intervalMinutes = DataValidator.getTimeframeMinutes(timeframe);
     const intervalMs = intervalMinutes * 60 * 1000;
-    const endTs = new Date(endDate || '2025-02-28T00:00:00Z').getTime();
-    const startTs = endTs - barCount * intervalMs;
+
+    let startTs: number;
+    let endTs: number;
+
+    if (startDate && endDate) {
+      startTs = new Date(startDate.includes('T') ? startDate : `${startDate}T00:00:00Z`).getTime();
+      endTs = new Date(endDate.includes('T') ? endDate : `${endDate}T23:59:59Z`).getTime();
+    } else {
+      endTs = new Date(endDate || '2025-02-28T00:00:00Z').getTime();
+      const fallbackCount = options?.count ?? 180;
+      startTs = endTs - fallbackCount * intervalMs;
+    }
+
+    const calculatedBars = Math.max(30, Math.floor((endTs - startTs) / intervalMs) + 1);
+    const barCount = calculatedBars;
 
     const candles: CandleData[] = [];
     let currentClose = basePrice;
@@ -53,7 +65,7 @@ export class MockProvider {
       const dateObj = new Date(barTs);
       const timeStr = dateObj.toISOString().slice(0, 16).replace('T', ' ');
 
-      // Stochastic quant process: Sine wave macro cycle + Volatility clustering + Normal noise
+      // Deterministic quant process: Sine wave macro cycle + Volatility clustering + Normal noise
       const cycle = Math.sin((i / barCount) * Math.PI * 3.5);
       const trendDrift = cycle * 0.0012 + 0.0004;
       const volCluster = 0.012 + 0.018 * Math.abs(Math.cos(i * 0.15));
@@ -136,31 +148,27 @@ export class MockProvider {
 
   public async getOpenInterest(symbol: string): Promise<OpenInterestRecord> {
     const now = Date.now();
-    let oiValue = 850000000;
-    if (symbol.includes('ETH')) oiValue = 350000000;
-    else if (symbol.includes('SOL')) oiValue = 120000000;
-
     return {
       timestamp: now,
       time: new Date(now).toISOString().slice(0, 16).replace('T', ' '),
       symbol,
-      openInterest: Math.round(oiValue / (symbol.includes('BTC') ? 64000 : 2800)),
-      openInterestValue: oiValue,
+      openInterest: 12500,
     };
   }
 
   public async getTrades(symbol: string, limit: number = 50): Promise<MarketTrade[]> {
     const trades: MarketTrade[] = [];
     const now = Date.now();
-    let price = symbol.includes('BTC') ? 64250 : symbol.includes('ETH') ? 2850 : 175;
+    const rng = createRng(1337);
+    let price = symbol.includes('BTC') ? 50000 : symbol.includes('ETH') ? 2850 : 175;
 
     for (let i = 0; i < limit; i++) {
       trades.push({
         id: `MOCK-TRD-${100000 + i}`,
         timestamp: now - (limit - i) * 1500,
-        price: Number((price * (1 + (Math.random() - 0.5) * 0.002)).toFixed(2)),
-        quantity: Number((0.05 + Math.random() * 1.5).toFixed(4)),
-        side: Math.random() > 0.48 ? 'BUY' : 'SELL',
+        price: Number((price * (1 + (rng() - 0.5) * 0.002)).toFixed(2)),
+        quantity: Number((0.05 + rng() * 1.5).toFixed(4)),
+        side: rng() > 0.48 ? 'BUY' : 'SELL',
       });
     }
 

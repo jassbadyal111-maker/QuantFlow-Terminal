@@ -21,7 +21,10 @@ export interface MarketDataProvider {
     options?: { count?: number; seed?: number; marketType?: 'PERPETUAL' | 'SPOT' }
   ): Promise<{ candles: CandleData[]; metadata: DatasetMetadata }>;
   getTrades(symbol: string, limit?: number): Promise<MarketTrade[]>;
-  getFundingRates(symbol: string): Promise<FundingRateRecord[]>;
+  getFundingRates(
+    symbol: string,
+    options?: { startTime?: number; endTime?: number }
+  ): Promise<FundingRateRecord[]>;
   getOpenInterest(symbol: string): Promise<OpenInterestRecord>;
   validateDataset(candles: CandleData[], timeframe?: string): ValidationReport;
 }
@@ -50,7 +53,10 @@ export class MockMarketDataProvider implements MarketDataProvider {
     return this.provider.getTrades(symbol, limit);
   }
 
-  public async getFundingRates(symbol: string): Promise<FundingRateRecord[]> {
+  public async getFundingRates(
+    symbol: string,
+    options?: { startTime?: number; endTime?: number }
+  ): Promise<FundingRateRecord[]> {
     return this.provider.getFundingRates(symbol);
   }
 
@@ -71,18 +77,29 @@ export class MockMarketDataProvider implements MarketDataProvider {
     options?: { seed?: number; count?: number }
   ): { candles: CandleData[]; metadata: DatasetMetadata } {
     const seed = options?.seed ?? 20250228;
-    const count = options?.count ?? 180;
+    const intervalMinutes = DataValidator.getTimeframeMinutes(timeframe);
+    const intervalMs = intervalMinutes * 60 * 1000;
+
+    let startTs: number;
+    let endTs: number;
+
+    if (startDate && endDate) {
+      startTs = new Date(startDate.includes('T') ? startDate : `${startDate}T00:00:00Z`).getTime();
+      endTs = new Date(endDate.includes('T') ? endDate : `${endDate}T23:59:59Z`).getTime();
+    } else {
+      endTs = new Date(endDate || '2025-02-28T00:00:00Z').getTime();
+      const fallbackCount = options?.count ?? 180;
+      startTs = endTs - fallbackCount * intervalMs;
+    }
+
+    const calculatedBars = Math.max(30, Math.floor((endTs - startTs) / intervalMs) + 1);
+    const count = calculatedBars;
     const rng = createRng(seed);
 
     let basePrice = 64200;
     if (symbol.includes('ETH')) basePrice = 2850;
     else if (symbol.includes('SOL')) basePrice = 175;
     else if (symbol.includes('AVAX')) basePrice = 32;
-
-    const intervalMinutes = DataValidator.getTimeframeMinutes(timeframe);
-    const intervalMs = intervalMinutes * 60 * 1000;
-    const endTs = new Date(endDate || '2025-02-28T00:00:00Z').getTime();
-    const startTs = endTs - count * intervalMs;
 
     const candles: CandleData[] = [];
     let currentClose = basePrice;
@@ -190,8 +207,11 @@ export class BinanceMarketDataProvider implements MarketDataProvider {
     return this.provider.getTrades(symbol, limit);
   }
 
-  public async getFundingRates(symbol: string): Promise<FundingRateRecord[]> {
-    return this.provider.getFundingRates(symbol);
+  public async getFundingRates(
+    symbol: string,
+    options?: { startTime?: number; endTime?: number }
+  ): Promise<FundingRateRecord[]> {
+    return this.provider.getFundingRates(symbol, options);
   }
 
   public async getOpenInterest(symbol: string): Promise<OpenInterestRecord> {
@@ -227,8 +247,11 @@ export class BybitMarketDataProvider implements MarketDataProvider {
     return this.provider.getTrades(symbol, limit);
   }
 
-  public async getFundingRates(symbol: string): Promise<FundingRateRecord[]> {
-    return this.provider.getFundingRates(symbol);
+  public async getFundingRates(
+    symbol: string,
+    options?: { startTime?: number; endTime?: number }
+  ): Promise<FundingRateRecord[]> {
+    return this.provider.getFundingRates(symbol, options);
   }
 
   public async getOpenInterest(symbol: string): Promise<OpenInterestRecord> {

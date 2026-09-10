@@ -1,27 +1,90 @@
 import { CandleData } from '../../types/backtest';
 import { ValidationReport, ValidationStatistics } from '../../types/dataset';
+import { calculateExpectedRowCount, timeframeToMinutes, timeframeToMs } from '../../utils/timeframe';
 
 export class DataValidator {
   /**
-   * Helper to convert timeframe string (e.g. '1m', '5m', '15m', '1h', '4h', '1d') into minutes
+   * Helper to convert timeframe string into minutes
    */
   public static getTimeframeMinutes(timeframe: string): number {
-    switch (timeframe.toLowerCase()) {
-      case '1m': return 1;
-      case '3m': return 3;
-      case '5m': return 5;
-      case '15m': return 15;
-      case '30m': return 30;
-      case '1h': return 60;
-      case '2h': return 120;
-      case '4h': return 240;
-      case '6h': return 360;
-      case '8h': return 480;
-      case '12h': return 720;
-      case '1d': return 1440;
-      case '1w': return 10080;
-      default: return 60;
+    return timeframeToMinutes(timeframe);
+  }
+
+  /**
+   * Validates exact date range coverage against requested boundaries.
+   */
+  public static validateRangeCoverage(
+    candles: CandleData[],
+    requestedStart: string | undefined,
+    requestedEnd: string | undefined,
+    timeframe: string
+  ): { valid: boolean; errors: string[]; warnings: string[]; expectedCount: number } {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    const intervalMs = timeframeToMs(timeframe);
+
+    if (!candles || candles.length === 0) {
+      return {
+        valid: false,
+        errors: ['Cannot validate range coverage on empty candle dataset.'],
+        warnings: [],
+        expectedCount: 0,
+      };
     }
+
+    const firstTs = candles[0].timestamp;
+    const lastTs = candles[candles.length - 1].timestamp;
+
+    let expectedCount = candles.length;
+
+    if (requestedStart) {
+      const reqStartMs = new Date(requestedStart).getTime();
+      if (!isNaN(reqStartMs)) {
+        // Tolerance is 2 intervals
+        if (firstTs > reqStartMs + intervalMs * 2) {
+          errors.push(
+            `Data range starts late: requested start ${requestedStart} (${reqStartMs}), but first candle begins at ${candles[0].time} (${firstTs}). Gap: ${Math.round((firstTs - reqStartMs) / (60 * 1000))} minutes.`
+          );
+        }
+      }
+    }
+
+    if (requestedEnd) {
+      const reqEndMs = new Date(requestedEnd).getTime();
+      if (!isNaN(reqEndMs)) {
+        if (lastTs < reqEndMs - intervalMs * 2) {
+          errors.push(
+            `Data range ends prematurely: requested end ${requestedEnd} (${reqEndMs}), but last candle ends at ${candles[candles.length - 1].time} (${lastTs}). Missing ${Math.round((reqEndMs - lastTs) / (60 * 1000))} minutes of history.`
+          );
+        }
+      }
+    }
+
+    if (requestedStart && requestedEnd) {
+      const startMs = new Date(requestedStart).getTime();
+      const endMs = new Date(requestedEnd).getTime();
+      if (!isNaN(startMs) && !isNaN(endMs) && endMs > startMs) {
+        expectedCount = calculateExpectedRowCount(startMs, endMs, timeframe);
+        const actualCount = candles.length;
+        const missing = expectedCount - actualCount;
+        if (missing > expectedCount * 0.20 && missing > 10) {
+          errors.push(
+            `Excessive missing historical candles: expected ~${expectedCount} bars for ${timeframe}, received only ${actualCount} bars (${missing} missing bars, ${((missing / expectedCount) * 100).toFixed(1)}% missing).`
+          );
+        } else if (missing > 0) {
+          warnings.push(
+            `Dataset has ${missing} fewer bars than continuous mathematical expectation (${actualCount}/${expectedCount} bars).`
+          );
+        }
+      }
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      warnings,
+      expectedCount,
+    };
   }
 
   /**
@@ -29,13 +92,14 @@ export class DataValidator {
    */
   public static validate(
     candles: CandleData[],
-    timeframe: string = '1h'
+    timeframe: string = '1h',
+    rangeOptions?: { requestedStart?: string; requestedEnd?: string }
   ): ValidationReport {
     const warnings: string[] = [];
     const errors: string[] = [];
 
     const expectedIntervalMinutes = this.getTimeframeMinutes(timeframe);
-    const intervalMs = expectedIntervalMinutes * 60 * 1000;
+    const intervalMs = timeframeToMs(timeframe);
 
     if (!candles || candles.length === 0) {
       return {
@@ -55,6 +119,8 @@ export class DataValidator {
           expectedIntervalMinutes,
           abnormalGapsCount: 0,
           invalidOhlcCount: 0,
+          expectedRowCount: 0,
+          actualRowCount: 0,
         },
       };
     }
@@ -87,9 +153,9 @@ export class DataValidator {
       if (c.volume < minVolume) minVolume = c.volume;
       if (c.volume > maxVolume) maxVolume = c.volume;
 
-      // 2. Impossible Prices
-      if (c.open <= 0 || c.high <= 0 || c.low <= 0 || c.close <= 0) {
-        errors.push(`Impossible non-positive price at bar ${i} (${c.time}): O=${c.open}, H=${c.high}, L=${c.low}, C=${c.close}`);
+      // 2. Impossible Prices (Zero or Negative)
+      if (c.open <= 0 || c.high <= 0 || c.low <= 0 || c.close <= 0 || !isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
+        errors.push(`Impossible non-positive/non-finite price at bar ${i} (${c.time}): O=${c.open}, H=${c.high}, L=${c.low}, C=${c.close}`);
         invalidOhlcCount++;
       }
 
@@ -154,6 +220,20 @@ export class DataValidator {
       warnings.push(`Dataset contains ${missingIntervals} missing ${timeframe} bar interval(s) across historical timeline.`);
     }
 
+    // Optional Range Coverage check
+    let expectedRowCount = candles.length;
+    if (rangeOptions?.requestedStart || rangeOptions?.requestedEnd) {
+      const coverage = this.validateRangeCoverage(
+        candles,
+        rangeOptions.requestedStart,
+        rangeOptions.requestedEnd,
+        timeframe
+      );
+      expectedRowCount = coverage.expectedCount;
+      coverage.errors.forEach((e) => errors.push(e));
+      coverage.warnings.forEach((w) => warnings.push(w));
+    }
+
     const isValid = errors.length === 0;
 
     const stats: ValidationStatistics = {
@@ -169,6 +249,8 @@ export class DataValidator {
       expectedIntervalMinutes,
       abnormalGapsCount,
       invalidOhlcCount,
+      expectedRowCount,
+      actualRowCount: candles.length,
     };
 
     return {
@@ -180,20 +262,32 @@ export class DataValidator {
   }
 
   /**
-   * Deterministic Checksum Generator for dataset versioning
+   * Deterministic, 100% full-dataset Checksum Generator using FNV-1a 32-bit hash
+   * Guarantees every single candle (timestamp, open, high, low, close, volume) alters the hash.
    */
   public static calculateChecksum(candles: CandleData[]): string {
-    if (candles.length === 0) return '00000000';
-    let hash = 0;
-    const step = Math.max(1, Math.floor(candles.length / 50));
-    for (let i = 0; i < candles.length; i += step) {
+    if (!candles || candles.length === 0) return '00000000';
+    
+    // FNV-1a 32-bit hash constants
+    let hash = 0x811c9dc5;
+    const FNV_PRIME = 0x01000193;
+
+    for (let i = 0; i < candles.length; i++) {
       const c = candles[i];
-      const str = `${c.timestamp}:${c.open}:${c.high}:${c.low}:${c.close}:${c.volume}`;
+      // Quantize prices to standard precision representation to ensure cross-platform floating point determinism
+      const o = c.open.toFixed(4);
+      const h = c.high.toFixed(4);
+      const l = c.low.toFixed(4);
+      const cl = c.close.toFixed(4);
+      const v = Math.round(c.volume);
+      const str = `${c.timestamp}|${o}|${h}|${l}|${cl}|${v}`;
+
       for (let j = 0; j < str.length; j++) {
-        hash = ((hash << 5) - hash) + str.charCodeAt(j);
-        hash |= 0;
+        hash ^= str.charCodeAt(j);
+        hash = Math.imul(hash, FNV_PRIME);
       }
     }
-    return Math.abs(hash).toString(16).toUpperCase().padStart(8, '0');
+
+    return (hash >>> 0).toString(16).toUpperCase().padStart(8, '0');
   }
 }

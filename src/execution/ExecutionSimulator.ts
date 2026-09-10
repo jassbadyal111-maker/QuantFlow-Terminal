@@ -16,6 +16,7 @@ export interface FillResult {
 export class ExecutionSimulator {
   private config: BacktestConfig;
   private orderCounter = 10000;
+  private executionCounter = 20000;
   private executionRecords: ExecutionRecord[] = [];
 
   constructor(config: BacktestConfig) {
@@ -38,43 +39,46 @@ export class ExecutionSimulator {
     }
 
     // Benchmark against $100k notional standard ticket
-    const notionalScale = Math.max(0.1, notional / 100000);
-    if (model === 'linear_impact') {
-      return Number((baseBps * (0.8 + 0.2 * notionalScale)).toFixed(2));
-    } else if (model === 'sqrt_impact') {
-      return Number((baseBps * Math.sqrt(notionalScale)).toFixed(2));
+    const benchmarkNotional = 100000;
+    const sizeRatio = notional / benchmarkNotional;
+
+    if (model === 'sqrt_impact') {
+      // Almgren-Chriss square root market impact model
+      return Number((baseBps * Math.sqrt(Math.max(0.1, sizeRatio))).toFixed(2));
     }
-    return baseBps;
+
+    // Default: linear market impact
+    return Number((baseBps * Math.max(0.5, Math.min(5.0, sizeRatio))).toFixed(2));
   }
 
   /**
-   * Calculates Bid/Ask execution price including spread and slippage
+   * Calculates taker execution fill price with realistic bid/ask spread crossing and slippage
    */
   public getMarketExecutionPrice(
     midPrice: number,
     side: 'BUY' | 'SELL',
-    notional: number
+    positionNotional: number
   ): { execPrice: number; slippageBps: number; feeRate: number } {
-    const spreadBps = this.config.execution.bidAskSpreadBps ?? 1.0;
-    const halfSpreadPct = (spreadBps / 2) / 10000;
-    const slippageBps = this.calculateSlippageBps(notional);
-    const slippagePct = slippageBps / 10000;
+    const slippageBps = this.calculateSlippageBps(positionNotional);
+    const halfSpreadBps = 0.5; // Baseline 1 bp bid/ask spread
+    const totalImpactBps = halfSpreadBps + slippageBps;
+    const totalImpactRatio = totalImpactBps / 10000;
+
+    const takerFeeRate = (this.config.execution.takerFeeBps ?? 5.5) / 10000;
 
     let execPrice = midPrice;
     if (side === 'BUY') {
-      // Buys execute against Ask: ask = mid + halfSpread + slippage
-      execPrice = midPrice * (1 + halfSpreadPct + slippagePct);
+      // Crossing the spread upwards as aggressive buyer
+      execPrice = midPrice * (1 + totalImpactRatio);
     } else {
-      // Sells execute against Bid: bid = mid - halfSpread - slippage
-      execPrice = midPrice * (1 - halfSpreadPct - slippagePct);
+      // Crossing the spread downwards as aggressive seller
+      execPrice = midPrice * (1 - totalImpactRatio);
     }
 
-    const feeRate = (this.config.execution.takerFeeBps ?? 5.0) / 10000;
-
     return {
-      execPrice: Number(execPrice.toFixed(midPrice < 10 ? 4 : 2)),
+      execPrice: Number(execPrice.toFixed(2)),
       slippageBps,
-      feeRate,
+      feeRate: takerFeeRate,
     };
   }
 
@@ -93,9 +97,10 @@ export class ExecutionSimulator {
       positionNotional
     );
 
-    // Support configurable partial fill simulation if configured
+    // Deterministic partial fill evaluation if configured (no Math.random)
     const partialFillProb = this.config.execution.partialFillProbability ?? 0;
-    const isPartial = partialFillProb > 0 && Math.random() < partialFillProb;
+    const seedHash = ((Math.imul(bar.timestamp ^ this.orderCounter, 0x5bd1e995) >>> 0) % 1000000) / 1000000;
+    const isPartial = partialFillProb > 0 && seedHash < partialFillProb;
     const fillRatio = isPartial ? 0.75 : 1.0;
 
     const filledNotional = Number((positionNotional * fillRatio).toFixed(2));
@@ -105,6 +110,7 @@ export class ExecutionSimulator {
     const filledSize = Number((filledNotional / execPrice).toFixed(4));
 
     const orderId = `ORD-EXEC-${++this.orderCounter}`;
+    const execId = `EXEC-${++this.executionCounter}`;
 
     const order: Order = {
       id: orderId,
@@ -124,16 +130,26 @@ export class ExecutionSimulator {
     };
 
     const record: ExecutionRecord = {
+      executionId: execId,
       orderId,
       timestamp: bar.time,
+      symbol: this.config.symbol,
+      side,
+      orderType: 'MARKET',
       requestedPrice: bar.close,
       fillPrice: execPrice,
+      requestedQuantity: totalSize,
+      filledQuantity: filledSize,
+      remainingQuantity: Number((totalSize - filledSize).toFixed(4)),
+      fee: feePaid,
+      feeRate,
+      slippage: slippagePaid,
+      latency: this.config.execution.latencyMs || 15,
+      liquiditySource: 'TAKER',
+      status: isPartial ? 'PARTIAL' : 'FILLED',
       quantity: filledSize,
       notional: filledNotional,
-      fee: feePaid,
-      slippage: slippagePaid,
       liquiditySide: 'TAKER',
-      status: isPartial ? 'PARTIAL' : 'FILLED',
     };
 
     this.executionRecords.push(record);
@@ -180,6 +196,8 @@ export class ExecutionSimulator {
     }
 
     const orderId = `ORD-LIMIT-${++this.orderCounter}`;
+    const execId = `EXEC-${++this.executionCounter}`;
+    const totalSize = Number((positionNotional / limitPrice).toFixed(4));
 
     if (!crossed) {
       const unfilledOrder: Order = {
@@ -191,7 +209,7 @@ export class ExecutionSimulator {
         side,
         price: limitPrice,
         avgFillPrice: 0,
-        amount: Number((positionNotional / limitPrice).toFixed(4)),
+        amount: totalSize,
         filledAmount: 0,
         status: 'REJECTED',
         fee: 0,
@@ -202,16 +220,26 @@ export class ExecutionSimulator {
         filled: false,
         order: unfilledOrder,
         executionRecord: {
+          executionId: execId,
           orderId,
           timestamp: bar.time,
+          symbol: this.config.symbol,
+          side,
+          orderType: 'LIMIT',
           requestedPrice: limitPrice,
           fillPrice: 0,
+          requestedQuantity: totalSize,
+          filledQuantity: 0,
+          remainingQuantity: totalSize,
+          fee: 0,
+          feeRate: 0,
+          slippage: 0,
+          latency: this.config.execution.latencyMs || 15,
+          liquiditySource: 'MAKER',
+          status: 'REJECTED',
           quantity: 0,
           notional: 0,
-          fee: 0,
-          slippage: 0,
           liquiditySide: 'MAKER',
-          status: 'REJECTED',
         },
         fillPrice: 0,
         feePaid: 0,
@@ -242,16 +270,26 @@ export class ExecutionSimulator {
     };
 
     const record: ExecutionRecord = {
+      executionId: execId,
       orderId,
       timestamp: bar.time,
+      symbol: this.config.symbol,
+      side,
+      orderType: 'LIMIT',
       requestedPrice: limitPrice,
       fillPrice,
+      requestedQuantity: size,
+      filledQuantity: size,
+      remainingQuantity: 0,
+      fee: feePaid,
+      feeRate,
+      slippage: 0,
+      latency: this.config.execution.latencyMs || 15,
+      liquiditySource: 'MAKER',
+      status: 'FILLED',
       quantity: size,
       notional: positionNotional,
-      fee: feePaid,
-      slippage: 0,
       liquiditySide: 'MAKER',
-      status: 'FILLED',
     };
 
     this.executionRecords.push(record);
@@ -286,6 +324,8 @@ export class ExecutionSimulator {
 
     if (!triggered) {
       const orderId = `ORD-STOP-${++this.orderCounter}`;
+      const execId = `EXEC-${++this.executionCounter}`;
+      const totalSize = Number((positionNotional / stopPrice).toFixed(4));
       return {
         filled: false,
         order: {
@@ -297,23 +337,33 @@ export class ExecutionSimulator {
           side,
           price: stopPrice,
           avgFillPrice: 0,
-          amount: Number((positionNotional / stopPrice).toFixed(4)),
+          amount: totalSize,
           filledAmount: 0,
           status: 'REJECTED',
           fee: 0,
           slippage: 0,
         },
         executionRecord: {
+          executionId: execId,
           orderId,
           timestamp: bar.time,
+          symbol: this.config.symbol,
+          side,
+          orderType: 'STOP',
           requestedPrice: stopPrice,
           fillPrice: 0,
+          requestedQuantity: totalSize,
+          filledQuantity: 0,
+          remainingQuantity: totalSize,
+          fee: 0,
+          feeRate: 0,
+          slippage: 0,
+          latency: this.config.execution.latencyMs || 15,
+          liquiditySource: 'TAKER',
+          status: 'REJECTED',
           quantity: 0,
           notional: 0,
-          fee: 0,
-          slippage: 0,
           liquiditySide: 'TAKER',
-          status: 'REJECTED',
         },
         fillPrice: 0,
         feePaid: 0,

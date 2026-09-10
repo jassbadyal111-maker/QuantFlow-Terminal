@@ -1,4 +1,5 @@
 import { BacktestConfig, CandleData, EquityPoint, Position, Trade } from '../types/backtest';
+import { LiquidationEvent } from '../types/marketData';
 
 export class PortfolioManager {
   private initialCapital: number;
@@ -49,6 +50,14 @@ export class PortfolioManager {
   }
 
   /**
+   * Applies an 8h periodic funding payment (positive = paid by account, negative = received)
+   */
+  public applyFundingPayment(payment: number): void {
+    this.totalFundingPaid += payment;
+    this.cash -= payment;
+  }
+
+  /**
    * Calculates maintenance margin requirement based on leverage tier
    */
   public getMaintenanceMarginRate(leverage: number): number {
@@ -94,7 +103,7 @@ export class PortfolioManager {
 
     this.totalFeesPaid += fee;
     this.totalSlippagePaid += slippage;
-    this.cash -= fee; // Deduct execution fee from cash
+    this.cash -= fee; // Deduct execution fee directly from cash balance
 
     const position: Position = {
       symbol,
@@ -136,7 +145,6 @@ export class PortfolioManager {
 
     this.totalFeesPaid += fee;
     this.totalSlippagePaid += slippage;
-    this.totalFundingPaid += funding;
 
     // Directional gross P&L calculation
     let grossPnl = 0;
@@ -154,7 +162,7 @@ export class PortfolioManager {
 
     const trade: Trade = {
       id: tradeId,
-      timestamp: exitTime, // filled with entry time in caller or preserved
+      timestamp: exitTime,
       exitTimestamp: exitTime,
       symbol,
       side: pos.side,
@@ -177,6 +185,78 @@ export class PortfolioManager {
     this.positions.delete(symbol);
     this.closedTrades.push(trade);
     return trade;
+  }
+
+  /**
+   * Force liquidates a breached position with mandatory liquidation penalty and audit event
+   */
+  public forceLiquidate(
+    symbol: string,
+    bar: CandleData,
+    tradeId: string,
+    penaltyRate: number = 0.01 // 1% liquidation fee/penalty
+  ): { trade: Trade; liquidationEvent: LiquidationEvent } | null {
+    const pos = this.positions.get(symbol);
+    if (!pos) return null;
+
+    const penalty = Number((pos.notional * penaltyRate).toFixed(2));
+    const fillPrice = pos.liquidationPrice;
+
+    let grossPnl = 0;
+    if (pos.side === 'LONG') {
+      grossPnl = (fillPrice - pos.entryPrice) * pos.size;
+    } else {
+      grossPnl = (pos.entryPrice - fillPrice) * pos.size;
+    }
+
+    const netLoss = grossPnl - penalty;
+    this.totalFeesPaid += penalty;
+    this.cash += netLoss;
+
+    const trade: Trade = {
+      id: tradeId,
+      timestamp: bar.time,
+      exitTimestamp: bar.time,
+      symbol,
+      side: pos.side,
+      entryPrice: pos.entryPrice,
+      exitPrice: fillPrice,
+      size: pos.size,
+      notional: pos.notional,
+      pnl: Number(grossPnl.toFixed(2)),
+      pnlPercent: -100,
+      fees: penalty,
+      funding: 0,
+      netPnl: Number(netLoss.toFixed(2)),
+      slippageBps: 0,
+      exitReason: 'LIQUIDATION',
+      durationBars: 1,
+      mfe: 0,
+      mae: -100,
+    };
+
+    this.positions.delete(symbol);
+    this.closedTrades.push(trade);
+
+    const bankruptcyPrice = pos.side === 'LONG'
+      ? pos.entryPrice * (1 - (1 / this.leverage))
+      : pos.entryPrice * (1 + (1 / this.leverage));
+
+    const liquidationEvent: LiquidationEvent = {
+      timestamp: bar.timestamp,
+      time: bar.time,
+      symbol,
+      side: pos.side,
+      quantity: pos.size,
+      liquidationPrice: pos.liquidationPrice,
+      bankruptcyPrice: Number(bankruptcyPrice.toFixed(2)),
+      maintenanceMargin: pos.maintenanceMargin,
+      loss: Number(Math.abs(netLoss).toFixed(2)),
+      fee: penalty,
+      reason: `Bar extreme touched liquidation price of $${pos.liquidationPrice}`,
+    };
+
+    return { trade, liquidationEvent };
   }
 
   /**
@@ -216,9 +296,14 @@ export class PortfolioManager {
   }
 
   /**
-   * Computes current instantaneous portfolio snapshot
+   * Computes instantaneous portfolio snapshot with deterministic audit figures
    */
-  public getSnapshot(barTime: string, benchmarkPrice: number, startBenchmarkPrice: number): EquityPoint {
+  public getSnapshot(
+    barTime: string,
+    benchmarkPrice: number,
+    startBenchmarkPrice: number,
+    timestamp?: number
+  ): EquityPoint {
     let totalUnrealized = 0;
     let totalMarginUsed = 0;
     let grossExposure = 0;
@@ -231,7 +316,7 @@ export class PortfolioManager {
       netExposure += pos.side === 'LONG' ? pos.notional : -pos.notional;
     }
 
-    const currentEquity = Math.round(this.cash + totalUnrealized);
+    const currentEquity = Number((this.cash + totalUnrealized).toFixed(2));
     if (currentEquity > this.peakEquity) {
       this.peakEquity = currentEquity;
     }
@@ -248,14 +333,22 @@ export class PortfolioManager {
       ? Number(((totalMarginUsed / currentEquity) * 100).toFixed(1))
       : 100;
 
+    const realizedPnl = Number((this.cash - this.initialCapital + this.totalFeesPaid + this.totalFundingPaid).toFixed(2));
+
     return {
       time: barTime.split(' ')[0] || barTime,
-      equity: currentEquity,
+      timestamp,
+      equity: Math.round(currentEquity),
       benchmarkEquity,
       drawdownPct,
-      pnl: currentEquity - this.initialCapital,
-      cumulativePnl: currentEquity - this.initialCapital,
+      pnl: Math.round(currentEquity - this.initialCapital),
+      cumulativePnl: Math.round(currentEquity - this.initialCapital),
       cashBalance: Math.round(this.cash),
+      positionNotional: Math.round(grossExposure),
+      unrealizedPnl: Number(totalUnrealized.toFixed(2)),
+      realizedPnl,
+      cumulativeFees: Number(this.totalFeesPaid.toFixed(2)),
+      cumulativeFunding: Number(this.totalFundingPaid.toFixed(2)),
       marginUtilization,
       grossExposure: Math.round(grossExposure),
       netExposure: Math.round(netExposure),

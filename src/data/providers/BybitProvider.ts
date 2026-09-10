@@ -3,6 +3,7 @@ import { DatasetMetadata } from '../../types/dataset';
 import { FundingRateRecord, MarketDataError, MarketTrade, OpenInterestRecord } from '../../types/marketData';
 import { DataValidator } from '../validation/DataValidator';
 import { BybitFundingProvider } from './FundingProvider';
+import { calculateExpectedRowCount, timeframeToMs } from '../../utils/timeframe';
 
 export class BybitProvider {
   public id = 'bybit-provider';
@@ -34,7 +35,7 @@ export class BybitProvider {
   private async fetchWithRetry(url: string, retries: number = 2): Promise<any> {
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
         if (resp.status === 429) {
           throw new MarketDataError(
             'RATE_LIMITED',
@@ -73,49 +74,120 @@ export class BybitProvider {
     timeframe: string,
     startDate?: string,
     endDate?: string,
-    options?: { count?: number; marketType?: 'PERPETUAL' | 'SPOT' }
+    options?: { count?: number; marketType?: 'PERPETUAL' | 'SPOT'; onProgress?: (msg: string) => void }
   ): Promise<{ candles: CandleData[]; metadata: DatasetMetadata }> {
     const cleanSymbol = symbol.replace('/', '').toUpperCase();
     const interval = this.normalizeInterval(timeframe);
     const category = options?.marketType === 'SPOT' ? 'spot' : 'linear';
-    const limit = Math.min(200, options?.count || 200);
+    const intervalMs = timeframeToMs(timeframe);
 
-    let url = `https://api.bybit.com/v5/market/kline?category=${category}&symbol=${cleanSymbol}&interval=${interval}&limit=${limit}`;
+    const endTimestamp = endDate ? new Date(endDate).getTime() : Date.now();
+    let startTimestamp: number;
+
     if (startDate) {
-      url += `&start=${new Date(startDate).getTime()}`;
-    }
-    if (endDate) {
-      url += `&end=${new Date(endDate).getTime()}`;
+      startTimestamp = new Date(startDate).getTime();
+    } else {
+      const count = options?.count || 300;
+      startTimestamp = endTimestamp - count * intervalMs;
     }
 
-    const response = await this.fetchWithRetry(url);
-    const rawList = response?.result?.list;
+    if (isNaN(startTimestamp) || isNaN(endTimestamp) || endTimestamp <= startTimestamp) {
+      throw new MarketDataError(
+        'INVALID_DATA',
+        `Invalid date range requested: ${startDate} to ${endDate}`
+      );
+    }
 
-    if (!Array.isArray(rawList) || rawList.length === 0) {
+    const expectedRowCount = calculateExpectedRowCount(startTimestamp, endTimestamp, timeframe);
+    const CHUNK_LIMIT = 200; // Bybit default limit per call
+    const allCandlesMap = new Map<number, CandleData>();
+    let currentStart = startTimestamp;
+    let requestsCount = 0;
+    const MAX_REQUESTS = 60;
+
+    while (currentStart < endTimestamp && requestsCount < MAX_REQUESTS) {
+      requestsCount++;
+      const currentEndChunk = Math.min(endTimestamp, currentStart + CHUNK_LIMIT * intervalMs);
+      const url = `https://api.bybit.com/v5/market/kline?category=${category}&symbol=${cleanSymbol}&interval=${interval}&limit=${CHUNK_LIMIT}&start=${currentStart}&end=${currentEndChunk}`;
+
+      const response = await this.fetchWithRetry(url);
+      const rawList = response?.result?.list;
+
+      if (!Array.isArray(rawList) || rawList.length === 0) {
+        break;
+      }
+
+      for (const row of rawList) {
+        const ts = Number(row[0]);
+        if (ts >= startTimestamp && ts <= endTimestamp && !allCandlesMap.has(ts)) {
+          const open = parseFloat(row[1]);
+          const high = parseFloat(row[2]);
+          const low = parseFloat(row[3]);
+          const close = parseFloat(row[4]);
+          const volume = parseFloat(row[5]);
+
+          allCandlesMap.set(ts, {
+            timestamp: ts,
+            time: new Date(ts).toISOString().slice(0, 16).replace('T', ' '),
+            open,
+            high,
+            low,
+            close,
+            volume,
+          });
+        }
+      }
+
+      // Bybit list is sorted desc (newest first). Find the max timestamp in this batch
+      let maxTsInBatch = 0;
+      for (const row of rawList) {
+        const ts = Number(row[0]);
+        if (ts > maxTsInBatch) maxTsInBatch = ts;
+      }
+
+      if (maxTsInBatch <= currentStart || currentEndChunk >= endTimestamp) {
+        currentStart = currentEndChunk + intervalMs;
+      } else {
+        currentStart = maxTsInBatch + intervalMs;
+      }
+
+      if (requestsCount % 5 === 0) {
+        await new Promise((r) => setTimeout(r, 80));
+      }
+    }
+
+    const candles = Array.from(allCandlesMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+
+    if (candles.length === 0) {
       throw new MarketDataError(
         'INSUFFICIENT_DATA',
         `No candle records returned by Bybit for ${symbol} on interval ${timeframe}.`
       );
     }
 
-    // Bybit returns newest first, so we reverse to ascending
-    const candles: CandleData[] = rawList
-      .slice()
-      .reverse()
-      .map((row: any) => {
-        const ts = Number(row[0]);
-        return {
-          timestamp: ts,
-          time: new Date(ts).toISOString().slice(0, 16).replace('T', ' '),
-          open: parseFloat(row[1]),
-          high: parseFloat(row[2]),
-          low: parseFloat(row[3]),
-          close: parseFloat(row[4]),
-          volume: parseFloat(row[5]),
-        };
-      });
+    // Exact Range Coverage Validation
+    if (startDate && endDate) {
+      const coverage = DataValidator.validateRangeCoverage(candles, startDate, endDate, timeframe);
+      if (!coverage.valid) {
+        throw new MarketDataError(
+          'DATA_INCOMPLETE',
+          `Bybit dataset incomplete: ${coverage.errors[0]}`
+        );
+      }
+    }
 
-    const validation = DataValidator.validate(candles, timeframe);
+    const validation = DataValidator.validate(candles, timeframe, {
+      requestedStart: startDate,
+      requestedEnd: endDate,
+    });
+
+    if (!validation.valid) {
+      throw new MarketDataError(
+        'DATA_INVALID',
+        `Bybit dataset failed integrity validation: ${validation.errors[0]}`
+      );
+    }
+
     const checksum = DataValidator.calculateChecksum(candles);
 
     const metadata: DatasetMetadata = {
@@ -128,6 +200,10 @@ export class BybitProvider {
       providerName: 'Bybit v5 REST API',
       symbol,
       timeframe,
+      requestedStart: startDate,
+      requestedEnd: endDate,
+      actualStart: candles[0].time,
+      actualEnd: candles[candles.length - 1].time,
       dateRange: {
         start: candles[0].time,
         end: candles[candles.length - 1].time,
@@ -136,10 +212,11 @@ export class BybitProvider {
       endTime: candles[candles.length - 1].time,
       totalBars: candles.length,
       rowCount: candles.length,
+      expectedRowCount,
       downloadedAt: new Date().toISOString(),
       checksum,
       schemaVersion: 'v2.1',
-      validationStatus: validation.valid ? 'PASSED' : 'WARNINGS',
+      validationStatus: validation.valid ? (validation.warnings.length > 0 ? 'WARNINGS' : 'PASSED') : 'FAILED',
       missingBarsCount: validation.statistics.missingIntervals,
       missingIntervals: validation.statistics.missingIntervals,
       duplicateCount: validation.statistics.duplicateRows,
@@ -157,8 +234,11 @@ export class BybitProvider {
     return { candles, metadata };
   }
 
-  public async getFundingRates(symbol: string): Promise<FundingRateRecord[]> {
-    return this.fundingProvider.getHistoricalFundingRates(symbol);
+  public async getFundingRates(
+    symbol: string,
+    options?: { startTime?: number; endTime?: number; limit?: number }
+  ): Promise<FundingRateRecord[]> {
+    return this.fundingProvider.getHistoricalFundingRates(symbol, options);
   }
 
   public async getOpenInterest(symbol: string): Promise<OpenInterestRecord> {
@@ -174,7 +254,7 @@ export class BybitProvider {
         time: new Date(ts).toISOString().slice(0, 16).replace('T', ' '),
         symbol,
         openInterest: oi,
-        openInterestValue: oi * 64000,
+        // No hardcoded oi * 64000
       };
     } catch (err: any) {
       throw new MarketDataError('DATA_FETCH_FAILED', `Failed to fetch Bybit Open Interest for ${symbol}: ${err.message}`);
@@ -186,9 +266,10 @@ export class BybitProvider {
     const url = `https://api.bybit.com/v5/market/recent-trade?category=linear&symbol=${cleanSymbol}&limit=${limit}`;
     try {
       const data = await this.fetchWithRetry(url, 1);
-      const list = data?.result?.list || [];
+      const list = data?.result?.list;
+      if (!Array.isArray(list)) return [];
       return list.map((t: any) => ({
-        id: String(t.execId),
+        id: String(t.execId || Math.random()),
         timestamp: Number(t.time),
         price: parseFloat(t.price),
         quantity: parseFloat(t.size),
