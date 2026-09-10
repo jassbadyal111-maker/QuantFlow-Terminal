@@ -3,13 +3,11 @@ import {
   Play,
   Square,
   Search,
-  SlidersHorizontal,
   ChevronDown,
   Database,
-  Activity,
   Layers,
-  Sparkles,
-  Zap,
+  ShieldCheck,
+  Cpu,
 } from 'lucide-react';
 import { BacktestConfig } from '../../types/backtest';
 
@@ -22,10 +20,17 @@ interface HeaderProps {
   onRunBacktest: () => void;
   onStopBacktest: () => void;
   onOpenCommandPalette: () => void;
+  datasetValidationStatus?: 'VALIDATED' | 'WARNINGS' | 'BLOCKED';
+  isCacheHit?: boolean;
 }
 
-const EXCHANGES = ['Binance Futures', 'Bybit Perp', 'OKX Swap', 'Deribit', 'Coinbase Prime'];
-const ASSETS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT', 'DOGE/USDT'];
+const EXCHANGES = [
+  { label: 'Mock Demo (Synthetic)', value: 'MOCK' },
+  { label: 'Binance Futures (Public REST)', value: 'BINANCE' },
+  { label: 'Bybit Linear (Public REST)', value: 'BYBIT' },
+];
+
+const ASSETS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'DOGEUSDT'];
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'];
 const DATE_PRESETS: ('3M' | '6M' | '1Y' | '3Y' | 'ALL')[] = ['3M', '6M', '1Y', '3Y', 'ALL'];
 
@@ -38,7 +43,11 @@ export const Header: React.FC<HeaderProps> = ({
   onRunBacktest,
   onStopBacktest,
   onOpenCommandPalette,
+  datasetValidationStatus = 'VALIDATED',
+  isCacheHit = false,
 }) => {
+  const isMock = !config.exchange || config.exchange.toUpperCase() === 'MOCK' || config.exchange.toLowerCase().includes('synthetic');
+
   return (
     <header className="h-14 border-b border-[#1c2436] bg-[#090d14] flex items-center justify-between px-3 text-xs select-none sticky top-0 z-30 font-sans">
       {/* Left: Workspace & Strategy context */}
@@ -49,33 +58,26 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-1.5 font-semibold text-slate-200 tracking-tight text-[13px]">
-              <span>ApexQuant</span>
+              <span>QuantFlow</span>
               <span className="text-[10px] uppercase tracking-wider px-1 py-0.2 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                 PRO TERMINAL
               </span>
             </div>
-            <div className="text-[10px] text-slate-400 font-mono-data">v4.3.0 · Event Engine</div>
+            <div className="text-[10px] text-slate-400 font-mono-data">v4.3.0 · Real Market Data Engine</div>
           </div>
-        </div>
-
-        {/* Project Selector */}
-        <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#0f1522] border border-[#1e2739] hover:border-[#2d3a52] cursor-pointer">
-          <Layers className="w-3.5 h-3.5 text-slate-400" />
-          <span className="text-slate-300 font-medium">Alpha Fund #4</span>
-          <ChevronDown className="w-3 h-3 text-slate-400" />
         </div>
 
         {/* Exchange Selector */}
         <div className="flex items-center gap-1">
           <select
             aria-label="Exchange Selector"
-            value={config.exchange}
+            value={config.exchange || 'MOCK'}
             onChange={(e) => onConfigChange({ exchange: e.target.value })}
-            className="bg-[#0f1522] border border-[#1e2739] hover:border-[#2d3a52] text-slate-300 rounded px-2 py-1 text-xs cursor-pointer focus:outline-none focus:border-emerald-500/50"
+            className="bg-[#0f1522] border border-[#1e2739] hover:border-[#2d3a52] text-slate-200 rounded px-2 py-1 text-xs cursor-pointer focus:outline-none focus:border-emerald-500/50 font-mono-data"
           >
             {EXCHANGES.map((ex) => (
-              <option key={ex} value={ex}>
-                {ex}
+              <option key={ex.value} value={ex.value}>
+                {ex.label}
               </option>
             ))}
           </select>
@@ -114,29 +116,45 @@ export const Header: React.FC<HeaderProps> = ({
           ))}
         </div>
 
-        {/* Date Presets */}
-        <div className="hidden lg:flex items-center bg-[#0b0f17] rounded border border-[#1c2436] p-0.5">
-          {DATE_PRESETS.map((preset) => (
-            <button
-              key={preset}
-              onClick={() =>
-                onConfigChange({
-                  dateRange: { ...config.dateRange, preset },
-                })
-              }
-              className={`px-1.5 py-0.5 rounded text-[11px] font-mono-data transition-colors ${
-                config.dateRange.preset === preset
-                  ? 'bg-[#1c2638] text-slate-200 font-semibold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              {preset}
-            </button>
-          ))}
+        {/* Trust Indicators (Section 17) */}
+        <div className="hidden xl:flex items-center gap-1.5 pl-2 border-l border-[#1c2436] text-[10px] font-mono-data">
+          {/* DATA SOURCE */}
+          {isMock ? (
+            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/40 font-semibold">
+              DATA: DEMO
+            </span>
+          ) : (
+            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 font-semibold">
+              DATA: HISTORICAL
+            </span>
+          )}
+
+          {/* ENGINE */}
+          <span className="px-1.5 py-0.5 rounded bg-[#0e1624] text-cyan-300 border border-cyan-500/30 flex items-center gap-1">
+            <Cpu className="w-2.5 h-2.5" />
+            ENGINE: DETERMINISTIC
+          </span>
+
+          {/* DATASET */}
+          <span className={`px-1.5 py-0.5 rounded border ${
+            datasetValidationStatus === 'VALIDATED'
+              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+              : datasetValidationStatus === 'WARNINGS'
+              ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+              : 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+          } flex items-center gap-1`}>
+            <ShieldCheck className="w-2.5 h-2.5" />
+            DATASET: {datasetValidationStatus}
+          </span>
+
+          {/* CACHE */}
+          <span className="px-1.5 py-0.5 rounded bg-[#0f1522] text-slate-300 border border-[#232f48]">
+            CACHE: {isCacheHit ? 'HIT' : 'READY'}
+          </span>
         </div>
       </div>
 
-      {/* Right: Data Cache Status + Backtest Action Controls + Command Palette */}
+      {/* Right: Command Palette + Backtest Execution Controls + Desk badge */}
       <div className="flex items-center gap-2.5">
         {/* Command Palette Trigger */}
         <button
@@ -150,18 +168,6 @@ export const Header: React.FC<HeaderProps> = ({
             ⌘K
           </kbd>
         </button>
-
-        {/* Data Status Indicator */}
-        <div className="hidden xl:flex items-center gap-1.5 px-2 py-1 rounded bg-[#0f1522] border border-[#1e2739] text-[11px]">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-          </span>
-          <Database className="w-3 h-3 text-slate-400" />
-          <span className="text-[10px] px-1.5 py-0.5 rounded font-mono-data font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/40">
-            DEMO / SYNTHETIC DATA
-          </span>
-        </div>
 
         {/* Backtest Execution Controls */}
         <div className="flex items-center gap-1.5">

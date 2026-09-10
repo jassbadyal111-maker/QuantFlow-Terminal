@@ -21,6 +21,7 @@ import {
 } from '../../utils/formatters';
 import { ResearchEngine } from '../../research/ResearchEngine';
 import { ExperimentRepository } from '../../persistence/ExperimentRepository';
+import { BacktestStore } from '../../persistence/BacktestStore';
 import { BacktestEngine } from '../../engine/BacktestEngine';
 import {
   Sliders,
@@ -96,40 +97,44 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
   const runHash = BacktestEngine.generateRunHash(config);
   const validationWarnings = ResearchEngine.evaluateValidation(config, candles, trades, equityCurve);
 
+  const isMockData = !config.exchange || config.exchange.toUpperCase() === 'MOCK' || config.exchange.toLowerCase().includes('synthetic');
+
+  const buildCurrentResult = () => ({
+    runId: `RUN-${runHash.slice(5, 11)}`,
+    timestamp: new Date().toISOString(),
+    reproducibilityHash: runHash,
+    engineVersion: BacktestEngine.ENGINE_VERSION,
+    isDeterministic: true,
+    dataset: {
+      id: isMockData ? 'mock-synthetic-feed' : `${config.exchange?.toLowerCase()}-${config.symbol.toLowerCase()}`,
+      name: isMockData ? `${config.symbol} Synthetic Feed` : `${config.exchange} ${config.symbol} Historical Feed`,
+      source: isMockData ? ('DEMO_SYNTHETIC' as const) : ('EXCHANGE_REST' as const),
+      providerName: config.exchange || 'Mock Provider',
+      symbol: config.symbol,
+      timeframe: config.timeframe,
+      dateRange: config.dateRange,
+      totalBars: candles.length,
+      missingBarsCount: 0,
+      duplicateCount: 0,
+      timezone: 'UTC',
+      version: '2.1.0',
+      isSynthetic: isMockData,
+      validationStatus: 'PASSED' as const,
+    },
+    config,
+    candles,
+    trades,
+    orders,
+    equityCurve,
+    metrics,
+    monthlyReturns,
+    validationWarnings,
+    logs,
+  });
+
   const handleExportCsv = () => {
-    const dummyResult = {
-      runId: `RUN-${runHash.slice(5, 11)}`,
-      timestamp: new Date().toISOString(),
-      reproducibilityHash: runHash,
-      engineVersion: 'ApexQuant Core v4.3.0',
-      isDeterministic: true,
-      dataset: {
-        id: 'synthetic-feed',
-        name: `${config.symbol} Synthetic Feed`,
-        source: 'DEMO_SYNTHETIC' as const,
-        providerName: 'ApexQuant Synthetic Feed',
-        symbol: config.symbol,
-        timeframe: config.timeframe,
-        dateRange: config.dateRange,
-        totalBars: candles.length,
-        missingBarsCount: 0,
-        duplicateCount: 0,
-        timezone: 'UTC',
-        version: '1.4.0',
-        isSynthetic: true,
-        validationStatus: 'PASSED' as const,
-      },
-      config,
-      candles,
-      trades,
-      orders,
-      equityCurve,
-      metrics,
-      monthlyReturns,
-      validationWarnings,
-      logs,
-    };
-    const csvContent = ExperimentRepository.exportTradesCsv(dummyResult);
+    const result = buildCurrentResult();
+    const csvContent = ExperimentRepository.exportTradesCsv(result as any);
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -140,40 +145,25 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
     document.body.removeChild(link);
   };
 
+  const handleExportSnapshot = () => {
+    const result = buildCurrentResult();
+    const snapshot = BacktestStore.createSnapshot(result as any);
+    const jsonStr = BacktestStore.exportSnapshotJson(snapshot);
+    const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `snapshot_${config.symbol.replace('/', '_')}_${runHash}.json`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleSaveExperiment = () => {
-    const dummyResult = {
-      runId: `RUN-${runHash.slice(5, 11)}`,
-      timestamp: new Date().toISOString(),
-      reproducibilityHash: runHash,
-      engineVersion: 'ApexQuant Core v4.3.0',
-      isDeterministic: true,
-      dataset: {
-        id: 'synthetic-feed',
-        name: `${config.symbol} Synthetic Feed`,
-        source: 'DEMO_SYNTHETIC' as const,
-        providerName: 'ApexQuant Synthetic Feed',
-        symbol: config.symbol,
-        timeframe: config.timeframe,
-        dateRange: config.dateRange,
-        totalBars: candles.length,
-        missingBarsCount: 0,
-        duplicateCount: 0,
-        timezone: 'UTC',
-        version: '1.4.0',
-        isSynthetic: true,
-        validationStatus: 'PASSED' as const,
-      },
-      config,
-      candles,
-      trades,
-      orders,
-      equityCurve,
-      metrics,
-      monthlyReturns,
-      validationWarnings,
-      logs,
-    };
-    ExperimentRepository.saveRun(dummyResult);
+    const result = buildCurrentResult();
+    ExperimentRepository.saveRun(result as any);
+    const snapshot = BacktestStore.createSnapshot(result as any);
+    BacktestStore.saveSnapshot(snapshot);
     setSavedToast(true);
     setTimeout(() => setSavedToast(false), 2500);
   };
@@ -211,6 +201,60 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
 
         {/* Scrollable Configuration Fields */}
         <div className="flex-1 overflow-y-auto p-3 space-y-4 text-xs font-sans">
+          {/* Data Source & Market Configuration */}
+          <div className="space-y-1.5 p-2 rounded bg-[#0d121c] border border-[#1a2333]">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-semibold text-slate-300">Data Source & Exchange</span>
+              <span className={`text-[10px] font-mono-data font-semibold ${isMockData ? 'text-amber-400' : 'text-emerald-400'}`}>
+                {isMockData ? 'DEMO SYNTHETIC' : 'EXCHANGE HISTORICAL'}
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              <select
+                aria-label="Data Source Exchange"
+                value={config.exchange || 'MOCK'}
+                onChange={(e) => onConfigChange({ exchange: e.target.value })}
+                className="w-full bg-[#090d14] border border-[#1c2436] text-slate-200 rounded px-2 py-1 text-[11px] font-mono-data"
+              >
+                <option value="MOCK">Mock Demo (Synthetic Seed)</option>
+                <option value="BINANCE">Binance Futures (Public REST)</option>
+                <option value="BYBIT">Bybit Linear (Public REST)</option>
+              </select>
+
+              <div className="grid grid-cols-2 gap-1.5">
+                <div>
+                  <span className="text-[9px] uppercase text-slate-400 font-mono-data">Symbol</span>
+                  <select
+                    aria-label="Symbol"
+                    value={config.symbol}
+                    onChange={(e) => onConfigChange({ symbol: e.target.value })}
+                    className="w-full bg-[#090d14] border border-[#1c2436] text-emerald-400 font-mono-data rounded px-2 py-1 text-[11px]"
+                  >
+                    <option value="BTCUSDT">BTCUSDT</option>
+                    <option value="ETHUSDT">ETHUSDT</option>
+                    <option value="SOLUSDT">SOLUSDT</option>
+                  </select>
+                </div>
+                <div>
+                  <span className="text-[9px] uppercase text-slate-400 font-mono-data">Timeframe</span>
+                  <select
+                    aria-label="Timeframe"
+                    value={config.timeframe}
+                    onChange={(e) => onConfigChange({ timeframe: e.target.value as any })}
+                    className="w-full bg-[#090d14] border border-[#1c2436] text-slate-200 font-mono-data rounded px-2 py-1 text-[11px]"
+                  >
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                    <option value="15m">15m</option>
+                    <option value="1h">1h</option>
+                    <option value="4h">4h</option>
+                    <option value="1d">1d</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Strategy Selection */}
           <div className="space-y-1.5">
             <label className="text-[11px] font-semibold text-slate-300 uppercase tracking-tight font-mono-data">
@@ -534,9 +578,15 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
         <div className="px-3 py-1.5 border-b border-[#1a2333] bg-[#0b0f17] flex items-center justify-between text-xs font-mono-data overflow-x-auto">
           <div className="flex items-center gap-3 shrink-0">
             <div className="flex items-center gap-2 pr-3 border-r border-[#1a2333]">
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono-data font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/40">
-                DEMO / SYNTHETIC DATA
-              </span>
+              {isMockData ? (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono-data font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/40">
+                  DEMO / SYNTHETIC DATA
+                </span>
+              ) : (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono-data font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/40">
+                  HISTORICAL / {config.exchange || 'BINANCE'}
+                </span>
+              )}
               <span className="text-[10px] px-1 py-0.5 rounded bg-[#0f1522] border border-[#1e2739] text-emerald-400 font-mono-data hidden md:inline">
                 {runHash}
               </span>
@@ -752,6 +802,14 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
               >
                 <Download className="w-3 h-3 text-slate-400" />
                 <span>Export CSV</span>
+              </button>
+              <button
+                onClick={handleExportSnapshot}
+                className="flex items-center gap-1 px-2 py-1 rounded bg-[#0f1522] border border-[#1e2739] text-cyan-300 hover:text-cyan-100 hover:border-cyan-500/40 text-[11px] font-mono-data"
+                title="Export complete BacktestSnapshot JSON"
+              >
+                <Download className="w-3 h-3 text-cyan-400" />
+                <span>Export Snapshot</span>
               </button>
               <button
                 onClick={handleSaveExperiment}

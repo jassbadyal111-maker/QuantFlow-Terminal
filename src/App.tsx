@@ -11,7 +11,7 @@ import {
   SAMPLE_STRATEGIES,
   SAMPLE_RISK_METRICS,
 } from './data/mockQuantData';
-import { runSimulatedBacktest } from './services/backtestEngine';
+import { runSimulatedBacktest, runBacktestAsync } from './services/backtestEngine';
 
 import { Sidebar } from './components/common/Sidebar';
 import { Header } from './components/common/Header';
@@ -61,36 +61,28 @@ export default function App() {
     }
   };
 
-  // Run backtest simulation with realistic progress ticks
-  const handleRunBacktest = useCallback(() => {
+  // Run backtest simulation with real async provider and validation pipeline
+  const handleRunBacktest = useCallback(async () => {
     if (isRunning) return;
     setIsRunning(true);
     setProgress(5);
-    setStatusMessage('Loading historical orderbook & tick archives...');
+    setStatusMessage('Connecting to quantitative market data provider...');
 
-    const step1 = setTimeout(() => {
-      setProgress(35);
-      setStatusMessage('Executing bar-by-bar matching engine & signal generator...');
-    }, 300);
-
-    const step2 = setTimeout(() => {
-      setProgress(75);
-      setStatusMessage('Simulating execution slippage, funding fees & margin calls...');
-    }, 700);
-
-    const step3 = setTimeout(() => {
-      const freshResult = runSimulatedBacktest(config);
+    try {
+      const freshResult = await runBacktestAsync(config, undefined, (pct, msg) => {
+        setProgress(pct);
+        setStatusMessage(msg);
+      });
       setBacktestResult(freshResult);
       setProgress(100);
       setStatusMessage('Backtest Execution Complete');
+    } catch (err: any) {
+      console.error('Backtest run error:', err);
+      setStatusMessage(`Error: ${err.message || 'Execution blocked'}`);
+      alert(`Backtest execution blocked or failed: ${err.message || 'Unknown market data error'}`);
+    } finally {
       setIsRunning(false);
-    }, 1100);
-
-    return () => {
-      clearTimeout(step1);
-      clearTimeout(step2);
-      clearTimeout(step3);
-    };
+    }
   }, [config, isRunning]);
 
   const handleStopBacktest = () => {
@@ -156,11 +148,14 @@ export default function App() {
         <Header
           config={config}
           onConfigChange={handleConfigChange}
-          strategies={strategies}
-          onSelectStrategy={handleStrategyChange}
           isRunning={isRunning}
+          progress={progress}
+          statusMessage={statusMessage}
           onRunBacktest={handleRunBacktest}
+          onStopBacktest={handleStopBacktest}
           onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+          datasetValidationStatus={backtestResult.validationWarnings?.length ? 'WARNINGS' : 'VALIDATED'}
+          isCacheHit={false}
         />
 
         {/* VIEW ROUTER */}

@@ -1,6 +1,7 @@
-import { BacktestConfig, BacktestResult } from '../types/backtest';
+import { BacktestConfig, BacktestResult, CandleData } from '../types/backtest';
 import { BacktestEngine } from '../engine/BacktestEngine';
-import { SyntheticMarketDataProvider } from '../data/MarketDataProvider';
+import { createMarketDataProvider } from '../data/MarketDataProvider';
+import { DatasetMetadata } from '../types/dataset';
 
 export { BacktestEngine };
 
@@ -9,19 +10,24 @@ export { BacktestEngine };
  */
 export async function runBacktestAsync(
   config: BacktestConfig,
+  preloaded?: { candles: CandleData[]; metadata: DatasetMetadata },
   onProgress?: (progress: number, status: string) => void
 ): Promise<BacktestResult> {
-  const engine = new BacktestEngine(config, new SyntheticMarketDataProvider());
+  const provider = createMarketDataProvider(config.exchange || 'mock');
+  const engine = new BacktestEngine(config, provider, preloaded);
   return await engine.execute(onProgress);
 }
 
 /**
- * Synchronous execution wrapper for instant UI updates
+ * Synchronous execution wrapper for instant UI updates (with mock or preloaded data)
  */
 export function runSimulatedBacktest(
   config: BacktestConfig,
+  preloaded?: { candles: CandleData[]; metadata: DatasetMetadata },
   onProgress?: (progress: number, status: string) => void
 ): BacktestResult {
-  const engine = new BacktestEngine(config, new SyntheticMarketDataProvider());
+  const provider = createMarketDataProvider(config.exchange || 'mock');
+  const engine = new BacktestEngine(config, provider, preloaded);
   return engine.executeSync(onProgress);
 }
+

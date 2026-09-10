@@ -4,29 +4,69 @@ import {
   CandleData,
   Order,
   Trade,
-  TradeMarker,
 } from '../types/backtest';
-import { MarketDataProvider, SyntheticMarketDataProvider } from '../data/MarketDataProvider';
+import { MarketDataProvider, MockMarketDataProvider } from '../data/MarketDataProvider';
+import { DataValidator } from '../data/validation/DataValidator';
 import { STRATEGY_REGISTRY, QuantitativeStrategy, EmaCrossoverStrategy } from '../strategies/Strategy';
 import { ExecutionSimulator } from '../execution/ExecutionSimulator';
 import { PortfolioManager } from '../portfolio/PortfolioManager';
 import { AnalyticsEngine } from '../analytics/AnalyticsEngine';
 import { ResearchEngine } from '../research/ResearchEngine';
+import { DatasetMetadata, ValidationReport } from '../types/dataset';
+import { MarketDataError } from '../types/marketData';
 
 export class BacktestEngine {
+  public static readonly ENGINE_VERSION = 'ApexQuant Core v4.3.0-prod';
   private config: BacktestConfig;
   private dataProvider: MarketDataProvider;
+  private preloadedCandles?: CandleData[];
+  private preloadedMetadata?: DatasetMetadata;
 
-  constructor(config: BacktestConfig, dataProvider?: MarketDataProvider) {
+  constructor(
+    config: BacktestConfig,
+    dataProvider?: MarketDataProvider,
+    preloaded?: { candles: CandleData[]; metadata: DatasetMetadata }
+  ) {
     this.config = config;
-    this.dataProvider = dataProvider || new SyntheticMarketDataProvider();
+    this.dataProvider = dataProvider || new MockMarketDataProvider();
+    if (preloaded) {
+      this.preloadedCandles = preloaded.candles;
+      this.preloadedMetadata = preloaded.metadata;
+    }
   }
 
   /**
    * Deterministic Hash for Run Reproducibility
+   * Integrates engine version, strategy version, params, exchange, market, symbol, timeframe,
+   * dataset checksum/seed, initial capital, leverage, margin, fees, and slippage.
    */
-  public static generateRunHash(config: BacktestConfig, datasetSeed: number = 42): string {
-    const raw = `${config.strategyId}-${config.symbol}-${config.timeframe}-${config.initialCapital}-${config.leverage}-${JSON.stringify(config.indicators)}-${datasetSeed}`;
+  public static generateRunHash(
+    config: BacktestConfig,
+    datasetChecksum: string = '00000000',
+    seed: number = 42
+  ): string {
+    const raw = [
+      this.ENGINE_VERSION,
+      config.strategyId,
+      config.exchange || 'MOCK',
+      config.symbol,
+      config.timeframe,
+      config.dateRange.start,
+      config.dateRange.end,
+      datasetChecksum,
+      config.initialCapital,
+      config.leverage,
+      config.marginMode || 'CROSS',
+      config.execution.makerFeeBps,
+      config.execution.takerFeeBps,
+      config.execution.slippageBps,
+      config.execution.slippageModel,
+      JSON.stringify(config.indicators),
+      JSON.stringify(config.entryRules),
+      JSON.stringify(config.exitRules),
+      seed,
+    ].join('::');
+
     let hash = 0;
     for (let i = 0; i < raw.length; i++) {
       hash = ((hash << 5) - hash) + raw.charCodeAt(i);
@@ -36,55 +76,52 @@ export class BacktestEngine {
   }
 
   /**
-   * Runs the complete deterministic event-driven backtest synchronously
+   * Core event-driven simulation loop executed against validated candles and dataset metadata
    */
-  public executeSync(onProgress?: (pct: number, msg: string) => void): BacktestResult {
+  public runSimulation(
+    rawCandles: CandleData[],
+    datasetMetadata: DatasetMetadata,
+    onProgress?: (pct: number, msg: string) => void
+  ): BacktestResult {
     const logs: string[] = [];
     const timestamp = new Date().toISOString();
-    const engineVersion = 'ApexQuant Core v4.3.0-prod';
+    const engineVersion = BacktestEngine.ENGINE_VERSION;
 
     logs.push(`[SYSTEM] Starting deterministic backtest execution at ${timestamp}`);
     logs.push(`[CONFIG] Strategy: ${this.config.strategyId} | Asset: ${this.config.symbol} | Frame: ${this.config.timeframe}`);
     logs.push(`[ACCOUNT] Capital: $${this.config.initialCapital.toLocaleString()} | Leverage: ${this.config.leverage}x | Margin: ${this.config.marginMode || 'CROSS'}`);
     logs.push(`[EXECUTION] Maker: ${this.config.execution.makerFeeBps} bps | Taker: ${this.config.execution.takerFeeBps} bps | Slippage: ${this.config.execution.slippageBps} bps`);
 
-    onProgress?.(15, 'Loading and validating historical market data...');
+    // 1. DATA LAYER AUDIT & VALIDATION
+    onProgress?.(15, 'Validating historical dataset integrity...');
+    const validation: ValidationReport = DataValidator.validate(rawCandles, this.config.timeframe);
 
-    // 1. DATA LAYER
-    let rawCandles: CandleData[] = [];
-    let datasetMetadata: any = null;
+    logs.push(`[DATA] Dataset: ${datasetMetadata.name || datasetMetadata.symbol} (${rawCandles.length} bars, Source: ${datasetMetadata.source})`);
+    logs.push(`[DATA] Range: ${datasetMetadata.startTime || rawCandles[0]?.time} → ${datasetMetadata.endTime || rawCandles[rawCandles.length - 1]?.time}`);
 
-    if (this.dataProvider instanceof SyntheticMarketDataProvider) {
-      const res = this.dataProvider.loadCandlesSync(
-        this.config.symbol,
-        this.config.timeframe,
-        this.config.dateRange.start,
-        this.config.dateRange.end,
-        { seed: 20250228, count: 160 }
+    if (!validation.valid) {
+      logs.push(`[VALIDATION] BLOCKED: Critical data integrity errors detected:`);
+      validation.errors.forEach((err) => logs.push(`[VALIDATION-ERROR] ${err}`));
+      throw new MarketDataError(
+        'INVALID_DATA',
+        `Backtest blocked due to ${validation.errors.length} critical data integrity violations in dataset: ${validation.errors[0]}`
       );
-      rawCandles = res.candles;
-      datasetMetadata = res.metadata;
-    } else {
-      const synthetic = new SyntheticMarketDataProvider();
-      const res = synthetic.loadCandlesSync(
-        this.config.symbol,
-        this.config.timeframe,
-        this.config.dateRange.start,
-        this.config.dateRange.end,
-        { seed: 20250228, count: 160 }
-      );
-      rawCandles = res.candles;
-      datasetMetadata = res.metadata;
     }
 
-    logs.push(`[DATA] ${datasetMetadata.name} loaded (${rawCandles.length} bars, ${datasetMetadata.source}). Status: ${datasetMetadata.validationStatus}`);
+    if (validation.warnings.length > 0) {
+      logs.push(`[VALIDATION] Passed with ${validation.warnings.length} non-critical warning(s).`);
+      validation.warnings.forEach((w) => logs.push(`[VALIDATION-WARN] ${w}`));
+    } else {
+      logs.push(`[VALIDATION] Dataset verified: 100% OHLC continuity, timestamps strictly chronological.`);
+    }
 
     // 2. STRATEGY SELECTION & INDICATOR PREPARATION
     onProgress?.(35, 'Initializing quantitative strategy and indicators...');
     const strategy: QuantitativeStrategy =
       STRATEGY_REGISTRY[this.config.strategyId] || new EmaCrossoverStrategy();
 
-    // Strategy parameters combined with backtest config overrides
+    logs.push(`[STRATEGY] Initialized ${strategy.name} (${strategy.version})`);
+
     const activeParams = {
       ...strategy.defaultParams,
       ...this.config.indicators,
@@ -97,7 +134,6 @@ export class BacktestEngine {
     // 3. EXECUTION & PORTFOLIO ENGINE SETUP
     const execution = new ExecutionSimulator(this.config);
     const portfolio = new PortfolioManager(this.config);
-
     const orders: Order[] = [];
     let tradeCounter = 1000;
     let activeTradeMetadata: {
@@ -160,12 +196,12 @@ export class BacktestEngine {
             };
           }
 
-          logs.push(`[LIQUIDATION] ${liquidationReason} @ Bar ${i} (${bar.time})`);
+          logs.push(`[RISK] LIQUIDATION triggered @ Bar ${i} (${bar.time}): ${liquidationReason}`);
           activeTradeMetadata = null;
           continue;
         }
 
-        // B. Update MFE (Max Favorable Excursion) and MAE (Max Adverse Excursion)
+        // B. Excursions & Trailing Stop Updates
         if (activeTradeMetadata) {
           if (bar.high > activeTradeMetadata.highestPriceSinceEntry) {
             activeTradeMetadata.highestPriceSinceEntry = bar.high;
@@ -234,7 +270,6 @@ export class BacktestEngine {
               this.config.timeframe
             );
 
-            // MFE and MAE calculations
             const mfe = currentPos.side === 'LONG'
               ? ((activeTradeMetadata.highestPriceSinceEntry - currentPos.entryPrice) / currentPos.entryPrice) * 100
               : ((currentPos.entryPrice - activeTradeMetadata.lowestPriceSinceEntry) / currentPos.entryPrice) * 100;
@@ -270,6 +305,7 @@ export class BacktestEngine {
                 side: 'EXIT',
                 pnl: closedTrade.netPnl,
               };
+              logs.push(`[FILL] Trade ${closedTrade.id} closed @ $${exitPrice} via ${exitReason}. Net P&L: $${closedTrade.netPnl}`);
             }
 
             activeTradeMetadata = null;
@@ -350,6 +386,8 @@ export class BacktestEngine {
               price: fill.fillPrice,
               side: side === 'LONG' ? 'BUY' : 'SELL',
             };
+
+            logs.push(`[ORDER] Signal: ${signal.action} ${side} submitted | [FILL] Executed @ $${fill.fillPrice} (Fee: $${fill.feePaid})`);
           }
         }
       } else if (signal.action === 'CLOSE' && currentPos && activeTradeMetadata) {
@@ -404,6 +442,7 @@ export class BacktestEngine {
             side: 'EXIT',
             pnl: closedTrade.netPnl,
           };
+          logs.push(`[FILL] Signal close ${closedTrade.id} @ $${exitFill.fillPrice}. Net P&L: $${closedTrade.netPnl}`);
         }
 
         activeTradeMetadata = null;
@@ -412,7 +451,7 @@ export class BacktestEngine {
 
     onProgress?.(80, 'Generating equity curve, risk statistics, and audit reports...');
 
-    // 5. BUILD COMPLETE EQUITY CURVE
+    // 5. BUILD COMPLETE EQUITY CURVE (Benchmark calculated strictly from this exact dataset)
     const equityCurve = candles.map((c) => {
       const snap = portfolio.getSnapshot(c.time, c.close, startBenchmarkPrice);
       return snap;
@@ -440,13 +479,16 @@ export class BacktestEngine {
       equityCurve
     );
 
-    const reproducibilityHash = BacktestEngine.generateRunHash(this.config, datasetMetadata.seed);
+    const checksum = datasetMetadata.checksum || DataValidator.calculateChecksum(rawCandles);
+    const reproducibilityHash = BacktestEngine.generateRunHash(
+      this.config,
+      checksum,
+      datasetMetadata.seed || 42
+    );
     const runId = `RUN-${reproducibilityHash.slice(5, 11)}-${Date.now().toString().slice(-4)}`;
 
-    logs.push(`[COMPLETE] Run ${runId} finalized in 0.28s. Total Trades: ${trades.length} | Sharpe: ${metrics.sharpeRatio} | Return: ${metrics.totalReturn}%`);
-    if (validationWarnings.length > 0) {
-      logs.push(`[VALIDATION] ${validationWarnings.length} research warning(s) flagged.`);
-    }
+    logs.push(`[ANALYTICS] Metrics calculated: Return: ${metrics.totalReturn}% | Sharpe: ${metrics.sharpeRatio} | MaxDD: ${metrics.maxDrawdown}%`);
+    logs.push(`[COMPLETE] Run ${runId} finalized successfully. Total Trades: ${trades.length}`);
 
     onProgress?.(100, 'Backtest simulation complete.');
 
@@ -469,7 +511,50 @@ export class BacktestEngine {
     };
   }
 
+  /**
+   * Synchronous execution method using preloaded data or MockProvider
+   */
+  public executeSync(onProgress?: (pct: number, msg: string) => void): BacktestResult {
+    if (this.preloadedCandles && this.preloadedMetadata) {
+      return this.runSimulation(this.preloadedCandles, this.preloadedMetadata, onProgress);
+    }
+
+    if (this.dataProvider instanceof MockMarketDataProvider) {
+      const res = this.dataProvider.loadCandlesSync(
+        this.config.symbol,
+        this.config.timeframe,
+        this.config.dateRange.start,
+        this.config.dateRange.end,
+        { seed: 20250228, count: 180 }
+      );
+      return this.runSimulation(res.candles, res.metadata, onProgress);
+    }
+
+    throw new MarketDataError(
+      'INVALID_DATA',
+      'executeSync requires preloaded dataset or MockMarketDataProvider. Use async execute() for live exchange historical providers.'
+    );
+  }
+
+  /**
+   * Asynchronous execution fetching from configured provider without silent fallback
+   */
   public async execute(onProgress?: (pct: number, msg: string) => void): Promise<BacktestResult> {
-    return Promise.resolve(this.executeSync(onProgress));
+    if (this.preloadedCandles && this.preloadedMetadata) {
+      return this.runSimulation(this.preloadedCandles, this.preloadedMetadata, onProgress);
+    }
+
+    onProgress?.(10, `Connecting to ${this.dataProvider.name}...`);
+
+    // Fetch candles from configured provider - WILL THROW if provider fails, no silent fallback
+    const res = await this.dataProvider.getCandles(
+      this.config.symbol,
+      this.config.timeframe,
+      this.config.dateRange.start,
+      this.config.dateRange.end,
+      { count: 180 }
+    );
+
+    return this.runSimulation(res.candles, res.metadata, onProgress);
   }
 }

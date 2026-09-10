@@ -41,21 +41,36 @@ export interface Strategy {
 
 export interface DatasetMetadata {
   id: string;
-  name: string;
-  source: 'DEMO_SYNTHETIC' | 'EXCHANGE_API';
+  datasetId?: string;
+  name?: string;
+  exchange?: 'BINANCE' | 'BYBIT' | 'MOCK';
+  marketType?: 'PERPETUAL' | 'SPOT';
+  source: 'DEMO_SYNTHETIC' | 'EXCHANGE_API' | 'LOCAL_CACHE';
   providerName: string;
   symbol: string;
   timeframe: string;
-  dateRange: {
+  dateRange?: {
     start: string;
     end: string;
   };
-  totalBars: number;
-  missingBarsCount: number;
-  duplicateCount: number;
+  startTime?: string;
+  endTime?: string;
+  totalBars?: number;
+  rowCount?: number;
+  downloadedAt?: string;
+  checksum?: string;
+  schemaVersion?: string;
+  missingBarsCount?: number;
+  missingIntervals?: number;
+  duplicateCount?: number;
+  duplicateRows?: number;
+  minPrice?: number;
+  maxPrice?: number;
+  minVolume?: number;
+  maxVolume?: number;
   timezone: string;
   seed?: number;
-  version: string;
+  version?: string;
   isSynthetic: boolean;
   validationStatus: 'PASSED' | 'WARNINGS' | 'FAILED';
   validationNotes?: string[];
