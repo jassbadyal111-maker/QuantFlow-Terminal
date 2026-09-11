@@ -92,7 +92,6 @@ export interface ExecutionRecord {
   latency: number;
   liquiditySource: 'MAKER' | 'TAKER';
   status: 'FILLED' | 'PARTIAL' | 'REJECTED';
-  // Backward-compatible properties
   quantity?: number;
   notional?: number;
   liquiditySide?: 'MAKER' | 'TAKER';
@@ -105,33 +104,60 @@ export type MarketDataErrorCode =
   | 'DATA_INCOMPLETE'
   | 'DATA_INVALID'
   | 'DATA_GAP'
+  | 'DATASET_INCOMPLETE'
+  | 'DATASET_INVALID'
+  | 'DATASET_DUPLICATE'
+  | 'PAGINATION_LIMIT'
   | 'UNSUPPORTED_SYMBOL'
   | 'UNSUPPORTED_TIMEFRAME'
   | 'FUNDING_UNAVAILABLE'
+  | 'FUNDING_DATA_MISSING'
   | 'INSUFFICIENT_DATA'
   | 'EXECUTION_REJECTED'
+  | 'EXECUTION_ERROR'
   | 'INSUFFICIENT_MARGIN'
   | 'LIQUIDATION'
+  | 'LIQUIDATION_ERROR'
   | 'INVALID_CONFIGURATION'
   | 'REPRODUCIBILITY_ERROR'
   | 'INVARIANT_VIOLATION'
+  | 'ACCOUNTING_INVARIANT_FAILED'
   | 'BACKTEST_FAILED';
+
+export interface MarketDataErrorDetails {
+  timestamp?: number | string;
+  symbol?: string;
+  expected?: unknown;
+  actual?: unknown;
+  context?: Record<string, unknown>;
+}
 
 export class MarketDataError extends Error {
   public code: MarketDataErrorCode;
   public technicalDetails?: string;
   public retryable: boolean;
+  public timestamp?: number | string;
+  public symbol?: string;
+  public expected?: unknown;
+  public actual?: unknown;
+  public context?: Record<string, unknown>;
 
   constructor(
     code: MarketDataErrorCode,
     message: string,
     technicalDetails?: string,
-    retryable: boolean = false
+    retryable: boolean = false,
+    details: MarketDataErrorDetails = {}
   ) {
     super(message);
     this.name = 'MarketDataError';
     this.code = code;
     this.technicalDetails = technicalDetails;
     this.retryable = retryable;
+    this.timestamp = details.timestamp;
+    this.symbol = details.symbol;
+    this.expected = details.expected;
+    this.actual = details.actual;
+    this.context = details.context;
   }
 }

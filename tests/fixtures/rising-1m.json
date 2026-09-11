@@ -1,0 +1,8 @@
+[
+  {"timestamp":1735689600000,"time":"2025-01-01 00:00","open":100,"high":101,"low":99,"close":100,"volume":1000},
+  {"timestamp":1735689660000,"time":"2025-01-01 00:01","open":100,"high":103,"low":99.5,"close":102,"volume":1100},
+  {"timestamp":1735689720000,"time":"2025-01-01 00:02","open":102,"high":106,"low":101,"close":105,"volume":1200},
+  {"timestamp":1735689780000,"time":"2025-01-01 00:03","open":105,"high":110,"low":104,"close":109,"volume":1300},
+  {"timestamp":1735689840000,"time":"2025-01-01 00:04","open":109,"high":112,"low":108,"close":111,"volume":1400},
+  {"timestamp":1735689900000,"time":"2025-01-01 00:05","open":111,"high":113,"low":110,"close":112,"volume":1500}
+]

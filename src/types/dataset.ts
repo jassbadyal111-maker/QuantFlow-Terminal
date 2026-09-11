@@ -1,4 +1,4 @@
-import { BacktestConfig, CandleData, EquityPoint, Order, PerformanceMetrics, Trade } from './backtest';
+import { PerformanceMetrics, Trade, Order, EquityPoint, BacktestConfig, CandleData } from './backtest';
 import { ExecutionRecord, FundingEvent, LiquidationEvent, TradeLedgerEntry } from './marketData';
 
 export type ExchangeId = 'BINANCE' | 'BYBIT' | 'MOCK';
@@ -19,6 +19,7 @@ export interface DatasetMetadata {
   startTime?: string;
   endTime?: string;
   rowCount?: number;
+  totalBars?: number;
   expectedRowCount?: number;
   source: 'EXCHANGE_API' | 'DEMO_SYNTHETIC' | 'LOCAL_CACHE';
   providerName: string;
@@ -40,11 +41,7 @@ export interface DatasetMetadata {
   seed?: number;
   validationNotes?: string[];
   name?: string;
-  totalBars?: number;
-  dateRange?: {
-    start: string;
-    end: string;
-  };
+  dateRange?: { start: string; end: string };
 }
 
 export interface ValidationStatistics {
@@ -103,4 +100,5 @@ export interface BacktestSnapshot {
   fundingEvents?: FundingEvent[];
   liquidationEvents?: LiquidationEvent[];
   tradeLedger?: TradeLedgerEntry[];
+  candles?: CandleData[];
 }
