@@ -1,3 +1,5 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
 import { ExecutionSimulator } from '../../src/execution/ExecutionSimulator';
 import { BacktestConfig } from '../../src/types/backtest';
 import { makeCandle } from '../fixtures/fixtures';
@@ -22,30 +24,30 @@ describe('execution simulator', () => {
     const sim = new ExecutionSimulator(config());
     const a = sim.fillMarketOrder(bar, 'BUY', 10000, 'T1');
     const b = sim.fillMarketOrder(bar, 'BUY', 10000, 'T2');
-    expect(a.fillPrice).toBe(b.fillPrice);
-    expect(a.executionRecord.filledQuantity).toBe(b.executionRecord.filledQuantity);
-    expect(a.feePaid).toBe(b.feePaid);
+    assert.equal(a.fillPrice, b.fillPrice);
+    assert.equal(a.executionRecord.filledQuantity, b.executionRecord.filledQuantity);
+    assert.equal(a.feePaid, b.feePaid);
   });
 
   it('does not fill a limit order unless touched', () => {
     const sim = new ExecutionSimulator(config());
     const result = sim.fillLimitOrder({ ...bar, low: 101 }, 'BUY', 100, 10000, 'T1');
-    expect(result.filled).toBe(false);
-    expect(result.executionRecord.filledQuantity).toBe(0);
+    assert.equal(result.filled, false);
+    assert.equal(result.executionRecord.filledQuantity, 0);
   });
 
   it('fills a touched limit at the documented price rule', () => {
     const sim = new ExecutionSimulator(config());
     const result = sim.fillLimitOrder({ ...bar, open: 98, low: 95 }, 'BUY', 100, 10000, 'T1');
-    expect(result.filled).toBe(true);
-    expect(result.fillPrice).toBe(98);
-    expect(result.executionRecord.liquiditySource).toBe('MAKER');
+    assert.equal(result.filled, true);
+    assert.equal(result.fillPrice, 98);
+    assert.equal(result.executionRecord.liquiditySource, 'MAKER');
   });
 
   it('stop buy triggers on high and executes as market', () => {
     const sim = new ExecutionSimulator(config());
     const result = sim.fillStopOrder(bar, 'BUY', 108, 10000, 'T1');
-    expect(result.filled).toBe(true);
-    expect(result.executionRecord.orderType).toBe('MARKET');
+    assert.equal(result.filled, true);
+    assert.equal(result.executionRecord.orderType, 'MARKET');
   });
 });
