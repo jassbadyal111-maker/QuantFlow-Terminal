@@ -1,3 +1,5 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
 import { DataValidator } from '../../src/data/validation/DataValidator';
 import { makeCandle, makeFlatSeries } from '../fixtures/fixtures';
 
@@ -9,18 +11,19 @@ describe('dataset integrity', () => {
       makeCandle(1735689660000, 98, 100, 97, 99),
     ];
     const report = DataValidator.validate(candles, '1m');
-    expect(report.valid).toBe(false);
-    expect(report.statistics.duplicateRows).toBe(1);
-    expect(report.statistics.invalidOhlcCount).toBeGreaterThan(0);
+    assert.equal(report.valid, false);
+    assert.equal(report.statistics.duplicateRows, 1);
+    assert.ok(report.statistics.invalidOhlcCount > 0);
   });
 
-  it('does not accept a small fixture as production-valid historical data', () => {
-    const report = DataValidator.validate(makeFlatSeries(6), '1m', {
+  it('rejects a partial historical range rather than warning', () => {
+    const candles = makeFlatSeries(6);
+    const report = DataValidator.validate(candles, '1m', {
       requestedStart: '2025-01-01T00:00:00.000Z',
-      requestedEnd: '2025-01-01T00:05:00.000Z',
+      requestedEnd: '2025-01-01T00:29:00.000Z',
     });
-    expect(report.valid).toBe(false);
-    expect(report.errors.some((e) => e.includes('Insufficient sample size'))).toBe(true);
+    assert.equal(report.valid, false);
+    assert.ok(report.errors.some((e) => e.includes('row count mismatch')));
   });
 
   it('checksum changes when a candle changes', () => {
@@ -28,6 +31,6 @@ describe('dataset integrity', () => {
     const original = DataValidator.calculateChecksum(candles);
     candles[10] = { ...candles[10], close: 101 };
     const changed = DataValidator.calculateChecksum(candles);
-    expect(changed).not.toBe(original);
+    assert.notEqual(changed, original);
   });
 });
