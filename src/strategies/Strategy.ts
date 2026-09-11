@@ -62,8 +62,8 @@ export class EmaCrossoverStrategy implements QuantitativeStrategy {
   };
 
   prepare(candles: CandleData[], params: Record<string, any>): CandleData[] {
-    const fastPeriod = Number(params.emaFast) || 21;
-    const slowPeriod = Number(params.emaSlow) || 55;
+    const fastPeriod = Number(params.fastEma ?? params.emaFast) || 21;
+    const slowPeriod = Number(params.slowEma ?? params.emaSlow) || 55;
     const atrPeriod = Number(params.atrPeriod) || 14;
 
     const closes = candles.map((c) => c.close);
@@ -88,7 +88,7 @@ export class EmaCrossoverStrategy implements QuantitativeStrategy {
     ctx: StrategyContext,
     params: Record<string, any>
   ): Signal {
-    if (barIndex < 2) return { action: 'HOLD', reason: 'Insufficient history' };
+    if (barIndex < 1) return { action: 'HOLD', reason: 'Insufficient history' };
 
     const curr = candles[barIndex];
     const prev = candles[barIndex - 1];

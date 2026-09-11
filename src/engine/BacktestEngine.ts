@@ -14,8 +14,11 @@ import { PortfolioManager } from '../portfolio/PortfolioManager';
 import { AnalyticsEngine } from '../analytics/AnalyticsEngine';
 import { ResearchEngine } from '../research/ResearchEngine';
 import { DatasetMetadata, ValidationReport } from '../types/dataset';
-import { ExecutionRecord, FundingEvent, LiquidationEvent, MarketDataError } from '../types/marketData';
+import { ExecutionRecord, FundingEvent, LiquidationEvent, MarketDataError, FundingRateRecord } from '../types/marketData';
 import { TradeLedger } from '../ledger/TradeLedger';
+import { PrecisionPolicy } from '../accounting/PrecisionPolicy';
+import { AccountingVerifier } from '../accounting/AccountingVerifier';
+import { FundingDataMissingError } from '../types/errors';
 
 export class BacktestEngine {
   public static readonly ENGINE_VERSION = 'ApexQuant Core v4.3.0-prod';
@@ -81,7 +84,8 @@ export class BacktestEngine {
   public runSimulation(
     rawCandles: CandleData[],
     datasetMetadata: DatasetMetadata,
-    onProgress?: (pct: number, msg: string) => void
+    onProgress?: (pct: number, msg: string) => void,
+    simulationOptions?: { historicalFundingRates?: FundingRateRecord[] }
   ): BacktestResult {
     const logs: string[] = [];
     const timestamp = new Date().toISOString();
@@ -97,6 +101,7 @@ export class BacktestEngine {
     const validation: ValidationReport = DataValidator.validate(rawCandles, this.config.timeframe, {
       requestedStart: this.config.dateRange.start,
       requestedEnd: this.config.dateRange.end,
+      allowShortFixtures: Boolean(datasetMetadata.isSynthetic || datasetMetadata.source === 'DEMO_SYNTHETIC'),
     });
 
     logs.push(`[DATA] Dataset: ${datasetMetadata.name || datasetMetadata.symbol} (${rawCandles.length} bars, Source: ${datasetMetadata.source})`);
@@ -157,18 +162,47 @@ export class BacktestEngine {
     } | null = null;
 
     const startBenchmarkPrice = candles[0]?.close || 1;
-    const fundingRate8h = (this.config.execution.fundingRate8hBps ?? 1.0) / 10000;
     const FUNDING_INTERVAL_MS = 8 * 3600 * 1000;
+
+    // Build historical funding rate index if provided
+    const historicalFundingMap = new Map<number, number>();
+    if (simulationOptions?.historicalFundingRates) {
+      for (const rec of simulationOptions.historicalFundingRates) {
+        const epoch = Math.round(rec.timestamp / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS;
+        historicalFundingMap.set(epoch, rec.rate);
+      }
+      logs.push(`[FUNDING] Loaded ${historicalFundingMap.size} historical funding settlement epochs.`);
+    }
 
     onProgress?.(50, 'Executing deterministic bar-by-bar matching & risk engine...');
 
-    // 4. EVENT-DRIVEN BAR-BY-BAR LOOP
+    // =========================================================================
+    // INSTITUTIONAL 13-STEP EVENT-DRIVEN SIMULATION LOOP
+    // Step 1: Market-data validation (OHLC sanity check per bar)
+    // Step 2: Funding event check (8-hour epoch settlement)
+    // Step 3: Existing-position risk checks (MFE / MAE updates)
+    // Step 4: Stop-loss / take-profit checks (Conservative Worst-Case: SL first)
+    // Step 5: Liquidation check (Maintenance Margin check & force liquidation)
+    // Step 6: Strategy signal evaluation
+    // Step 7: New order submission
+    // Step 8: Order execution & fill simulation
+    // Step 9: Position update
+    // Step 10: Fee accounting
+    // Step 11: Equity calculation
+    // Step 12: Ledger update
+    // Step 13: Analytics snapshot
+    // =========================================================================
     for (let i = 0; i < candles.length; i++) {
       const bar = candles[i];
       const prevBar = i > 0 ? candles[i - 1] : null;
       let currentPos = portfolio.getPosition(this.config.symbol);
 
-      // A. Periodic 8-Hour Funding Settlement Check
+      // STEP 1: Market-Data Validation Check
+      if (bar.high < bar.low || bar.open <= 0 || bar.close <= 0) {
+        throw new MarketDataError('INVALID_DATA', `Corrupted OHLC on bar ${i} at ${bar.time}`);
+      }
+
+      // STEP 2: Periodic 8-Hour Funding Settlement Check
       if (currentPos && prevBar) {
         const prevEpoch = Math.floor(prevBar.timestamp / FUNDING_INTERVAL_MS);
         const currEpoch = Math.floor(bar.timestamp / FUNDING_INTERVAL_MS);
@@ -177,9 +211,27 @@ export class BacktestEngine {
           const intervalsPassed = currEpoch - prevEpoch;
           for (let ep = 0; ep < intervalsPassed; ep++) {
             const fundingTs = (prevEpoch + ep + 1) * FUNDING_INTERVAL_MS;
+
+            // Resolve funding rate
+            let rateForEpoch: number;
+            if (historicalFundingMap.has(fundingTs)) {
+              rateForEpoch = historicalFundingMap.get(fundingTs)!;
+            } else if (!datasetMetadata.isSynthetic && (this.config.execution as any).fundingMode !== 'SIMULATED') {
+              if (historicalFundingMap.size > 0) {
+                throw new FundingDataMissingError(
+                  `Historical funding rate missing for epoch ${new Date(fundingTs).toISOString()} on ${currentPos.symbol}`,
+                  { timestamp: fundingTs, symbol: currentPos.symbol }
+                );
+              } else {
+                rateForEpoch = (this.config.execution.fundingRate8hBps ?? 1.0) / 10000;
+              }
+            } else {
+              rateForEpoch = (this.config.execution.fundingRate8hBps ?? 1.0) / 10000;
+            }
+
             // Long pays when funding > 0; short receives
             const multiplier = currentPos.side === 'LONG' ? 1 : -1;
-            const payment = Number((currentPos.notional * fundingRate8h * multiplier).toFixed(2));
+            const payment = PrecisionPolicy.roundCash(currentPos.notional * rateForEpoch * multiplier);
 
             const cashBefore = portfolio.getCash();
             portfolio.applyFundingPayment(payment);
@@ -189,7 +241,7 @@ export class BacktestEngine {
               timestamp: fundingTs,
               time: new Date(fundingTs).toISOString().slice(0, 16).replace('T', ' '),
               symbol: currentPos.symbol,
-              rate: fundingRate8h,
+              rate: rateForEpoch,
               markPrice: bar.close,
               intervalHours: 8,
               positionNotional: currentPos.notional,
@@ -199,6 +251,7 @@ export class BacktestEngine {
               cashAfter,
             };
             fundingEvents.push(fundingEvent);
+            ledger.recordFundingEntry(fundingEvent);
 
             ledger.recordCashTx(
               fundingTs,
@@ -539,20 +592,6 @@ export class BacktestEngine {
     const finalEquity = finalPoint?.equity ?? this.config.initialCapital;
     const finalPos = portfolio.getPosition(this.config.symbol);
 
-    // Accounting Invariants Verification
-    const invariantCheck = ledger.verifyInvariants(
-      this.config.initialCapital,
-      portfolio.getCash(),
-      finalEquity,
-      finalPos ? finalPos.unrealizedPnl : 0
-    );
-
-    if (invariantCheck.passed) {
-      logs.push(`[LEDGER] Accounting invariants verified: Equity == Cash + UnrealizedPnL, Cash balance reconciled.`);
-    } else {
-      invariantCheck.errors.forEach((err) => logs.push(`[LEDGER-ERROR] ${err}`));
-    }
-
     // Performance Metrics Calculation
     const metrics = AnalyticsEngine.calculateMetrics(
       equityCurve,
@@ -562,6 +601,48 @@ export class BacktestEngine {
       portfolio.getTotalFunding(),
       portfolio.getTotalSlippage()
     );
+
+    // Accounting Invariants Full Audit
+    const auditReport = AccountingVerifier.audit(
+      {
+        runId: '',
+        timestamp,
+        reproducibilityHash: '',
+        engineVersion,
+        isDeterministic: true,
+        dataset: datasetMetadata,
+        config: this.config,
+        candles,
+        trades,
+        orders,
+        equityCurve,
+        metrics,
+        monthlyReturns: [],
+        validationWarnings: [],
+        logs: [],
+        executionRecords: execution.getExecutionRecords(),
+        fundingEvents,
+        liquidationEvents,
+        tradeLedger: ledger.getEntries(),
+      },
+      this.config.initialCapital,
+      ledger.getCashTransactions(),
+      portfolio.getCash()
+    );
+
+    const invariantCheck = ledger.verifyInvariants(
+      this.config.initialCapital,
+      portfolio.getCash(),
+      finalEquity,
+      finalPos ? finalPos.unrealizedPnl : 0
+    );
+
+    if (auditReport.passed && invariantCheck.passed) {
+      logs.push(`[LEDGER] Accounting invariants verified: All 13 invariants satisfied. Cash reconciled.`);
+    } else {
+      auditReport.violations.forEach((v) => logs.push(`[LEDGER-AUDIT-ERROR] Invariant #${v.invariantId} (${v.name}): ${v.message}`));
+      invariantCheck.errors.forEach((err) => logs.push(`[LEDGER-ERROR] ${err}`));
+    }
 
     const monthlyReturns = AnalyticsEngine.calculateMonthlyReturns(equityCurve);
 
@@ -606,8 +687,12 @@ export class BacktestEngine {
       fundingEvents,
       liquidationEvents,
       tradeLedger: ledger.getEntries(),
-      invariantsPassed: invariantCheck.passed,
-      invariantCheckErrors: invariantCheck.errors,
+      invariantsPassed: auditReport.passed && invariantCheck.passed,
+      invariantCheckErrors: [
+        ...auditReport.violations.map((v) => `Invariant #${v.invariantId} (${v.name}): ${v.message}`),
+        ...invariantCheck.errors,
+      ],
+      auditReport,
     };
   }
 

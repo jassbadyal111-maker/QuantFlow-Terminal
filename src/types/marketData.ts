@@ -36,6 +36,7 @@ export interface LiquidationEvent {
 }
 
 export interface TradeLedgerEntry {
+  eventType?: 'TRADE' | 'LIQUIDATION' | 'FUNDING' | 'FEE';
   tradeId: string;
   symbol: string;
   side: 'LONG' | 'SHORT';

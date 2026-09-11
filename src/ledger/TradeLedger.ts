@@ -1,5 +1,6 @@
-import { TradeLedgerEntry } from '../types/marketData';
+import { TradeLedgerEntry, FundingEvent } from '../types/marketData';
 import { Trade } from '../types/backtest';
+import { PrecisionPolicy } from '../accounting/PrecisionPolicy';
 
 export interface LedgerCashTransaction {
   id: string;
@@ -22,8 +23,8 @@ export class TradeLedger {
       timestamp: startTimestamp,
       barTime: startTime,
       type: 'DEPOSIT',
-      amount: initialCapital,
-      cashBalanceAfter: initialCapital,
+      amount: PrecisionPolicy.roundCash(initialCapital),
+      cashBalanceAfter: PrecisionPolicy.roundCash(initialCapital),
       description: `Initial equity allocation: $${initialCapital.toLocaleString()}`,
     });
   }
@@ -45,20 +46,21 @@ export class TradeLedger {
     exitExecutionIds: string[] = []
   ): void {
     const ledgerEntry: TradeLedgerEntry = {
+      eventType: trade.exitReason === 'LIQUIDATION' ? 'LIQUIDATION' : 'TRADE',
       tradeId: trade.id,
       symbol: trade.symbol,
       side: trade.side,
       entryTimestamp: trade.timestamp,
       exitTimestamp: trade.exitTimestamp || trade.timestamp,
-      entryPrice: trade.entryPrice,
-      exitPrice: trade.exitPrice,
-      quantity: trade.size,
-      notional: trade.notional,
-      grossPnl: trade.pnl,
-      fees: trade.fees,
-      funding: trade.funding,
+      entryPrice: PrecisionPolicy.roundPrice(trade.entryPrice),
+      exitPrice: PrecisionPolicy.roundPrice(trade.exitPrice),
+      quantity: PrecisionPolicy.roundQuantity(trade.size),
+      notional: PrecisionPolicy.roundCash(trade.notional),
+      grossPnl: PrecisionPolicy.roundPnl(trade.pnl),
+      fees: PrecisionPolicy.roundFee(trade.fees),
+      funding: PrecisionPolicy.roundFunding(trade.funding || 0),
       slippage: Number(((trade.notional * (trade.slippageBps || 0)) / 10000).toFixed(2)),
-      netPnl: trade.netPnl,
+      netPnl: PrecisionPolicy.roundPnl(trade.netPnl),
       mfe: trade.mfe,
       mae: trade.mae,
       durationBars: trade.durationBars,
@@ -68,6 +70,33 @@ export class TradeLedger {
     };
 
     this.entries.push(Object.freeze(ledgerEntry));
+  }
+
+  public recordFundingEntry(fundingEvent: FundingEvent): void {
+    const entry: TradeLedgerEntry = {
+      eventType: 'FUNDING',
+      tradeId: `FUND-${fundingEvent.timestamp}`,
+      symbol: fundingEvent.symbol,
+      side: fundingEvent.side,
+      entryTimestamp: fundingEvent.time,
+      exitTimestamp: fundingEvent.time,
+      entryPrice: PrecisionPolicy.roundPrice(fundingEvent.markPrice),
+      exitPrice: PrecisionPolicy.roundPrice(fundingEvent.markPrice),
+      quantity: 0,
+      notional: PrecisionPolicy.roundCash(fundingEvent.positionNotional),
+      grossPnl: 0,
+      fees: 0,
+      funding: PrecisionPolicy.roundFunding(fundingEvent.payment),
+      slippage: 0,
+      netPnl: PrecisionPolicy.roundPnl(-fundingEvent.payment),
+      mfe: 0,
+      mae: 0,
+      durationBars: 0,
+      exitReason: 'FUNDING',
+      entryExecutionIds: [],
+      exitExecutionIds: [],
+    };
+    this.entries.push(Object.freeze(entry));
   }
 
   public recordCashTx(
@@ -83,8 +112,8 @@ export class TradeLedger {
       timestamp,
       barTime,
       type,
-      amount,
-      cashBalanceAfter,
+      amount: PrecisionPolicy.roundCash(amount),
+      cashBalanceAfter: PrecisionPolicy.roundCash(cashBalanceAfter),
       description,
     });
   }
@@ -103,25 +132,27 @@ export class TradeLedger {
     const errors: string[] = [];
 
     // Invariant 1: Equity == Cash + UnrealizedPnL
-    const expectedEquity = Math.round(currentCash + unrealizedPnl);
-    if (Math.abs(currentEquity - expectedEquity) > 1.0) {
+    const expectedEquity = PrecisionPolicy.roundCash(currentCash + unrealizedPnl);
+    const actualEquity = PrecisionPolicy.roundCash(currentEquity);
+    if (!PrecisionPolicy.areMonetaryEqual(actualEquity, expectedEquity, 0.05)) {
       errors.push(
-        `Invariant violation: Equity ($${currentEquity}) != Cash ($${currentCash}) + UnrealizedPnL ($${unrealizedPnl}) [Diff: $${(currentEquity - expectedEquity).toFixed(2)}]`
+        `Invariant violation: Equity ($${actualEquity}) != Cash ($${currentCash}) + UnrealizedPnL ($${unrealizedPnl}) [Diff: $${(actualEquity - expectedEquity).toFixed(2)}]`
       );
     }
 
-    // Invariant 2: Net Cash Reconciles to Initial + Trades Net Realized
-    let totalRealizedFromTrades = 0;
-    for (const e of this.entries) {
-      totalRealizedFromTrades += e.netPnl;
-    }
-
-    // Also include external cash transactions (like funding if not embedded in closed trades)
+    // Invariant 2: Net Cash Reconciles to Initial + All Cash Movements
     let netTxSum = initialCapital;
     for (const tx of this.cashTransactions) {
       if (tx.type !== 'DEPOSIT') {
         netTxSum += tx.amount;
       }
+    }
+    const roundedNetTxSum = PrecisionPolicy.roundCash(netTxSum);
+    const roundedCurrentCash = PrecisionPolicy.roundCash(currentCash);
+    if (!PrecisionPolicy.areMonetaryEqual(roundedCurrentCash, roundedNetTxSum, 0.05)) {
+      errors.push(
+        `Invariant violation: Portfolio Cash ($${roundedCurrentCash}) does not reconcile with starting capital + ledger cash movements ($${roundedNetTxSum}) [Diff: $${(roundedCurrentCash - roundedNetTxSum).toFixed(2)}]`
+      );
     }
 
     return {

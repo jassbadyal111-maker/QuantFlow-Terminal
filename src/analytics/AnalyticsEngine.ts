@@ -124,16 +124,24 @@ export class AnalyticsEngine {
       : 0;
 
     // Max Drawdown & Max Drawdown Duration
+    let peak = initialCapital;
     let maxDrawdown = 0;
     let currentDdDuration = 0;
     let maxDrawdownDurationDays = 0;
 
     for (let i = 0; i < equityCurve.length; i++) {
-      const dd = equityCurve[i].drawdownPct;
-      if (dd < maxDrawdown) {
-        maxDrawdown = dd;
+      const eq = equityCurve[i].equity;
+      if (eq > peak) {
+        peak = eq;
       }
-      if (dd < -0.01) {
+      const calculatedDd = peak > 0 ? ((peak - eq) / peak) * 100 : 0;
+      const explicitDd = Math.abs(equityCurve[i].drawdownPct || 0);
+      const effectiveDd = Math.max(calculatedDd, explicitDd);
+
+      if (effectiveDd > maxDrawdown) {
+        maxDrawdown = Number(effectiveDd.toFixed(2));
+      }
+      if (effectiveDd > 0.01) {
         currentDdDuration++;
         if (currentDdDuration > maxDrawdownDurationDays) {
           maxDrawdownDurationDays = currentDdDuration;

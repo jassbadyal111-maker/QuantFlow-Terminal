@@ -19,13 +19,14 @@ export interface DatasetMetadata {
   startTime?: string;
   endTime?: string;
   rowCount?: number;
+  candleCount?: number;
   expectedRowCount?: number;
   source: 'EXCHANGE_API' | 'DEMO_SYNTHETIC' | 'LOCAL_CACHE';
-  providerName: string;
+  providerName?: string;
   downloadedAt?: string;
   checksum?: string;
   schemaVersion?: string;
-  validationStatus: ValidationStatus;
+  validationStatus?: ValidationStatus;
   missingIntervals?: number;
   missingBarsCount?: number;
   duplicateRows?: number;
@@ -34,12 +35,16 @@ export interface DatasetMetadata {
   maxPrice?: number;
   minVolume?: number;
   maxVolume?: number;
-  timezone: string;
+  timezone?: string;
   version?: string;
   isSynthetic: boolean;
   seed?: number;
   validationNotes?: string[];
   name?: string;
+  description?: string;
+  completeness?: number;
+  hasGaps?: boolean;
+  generatedAt?: string;
   totalBars?: number;
   dateRange?: {
     start: string;

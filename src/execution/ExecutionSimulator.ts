@@ -31,8 +31,8 @@ export class ExecutionSimulator {
    * Calculates execution slippage in bps based on configured model and notional size
    */
   public calculateSlippageBps(notional: number): number {
-    const baseBps = this.config.execution.slippageBps || 2.5;
-    const model = this.config.execution.slippageModel || 'linear_impact';
+    const baseBps = this.config.execution.slippageBps ?? 2.5;
+    const model = this.config.execution.slippageModel || 'fixed';
 
     if (model === 'fixed') {
       return baseBps;
@@ -60,7 +60,9 @@ export class ExecutionSimulator {
     positionNotional: number
   ): { execPrice: number; slippageBps: number; feeRate: number } {
     const slippageBps = this.calculateSlippageBps(positionNotional);
-    const halfSpreadBps = 0.5; // Baseline 1 bp bid/ask spread
+    const halfSpreadBps = this.config.execution.bidAskSpreadBps !== undefined
+      ? this.config.execution.bidAskSpreadBps / 2
+      : (this.config.execution.slippageModel === 'linear_impact' || this.config.execution.slippageModel === 'sqrt_impact' ? 0.5 : 0);
     const totalImpactBps = halfSpreadBps + slippageBps;
     const totalImpactRatio = totalImpactBps / 10000;
 

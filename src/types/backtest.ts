@@ -48,7 +48,7 @@ export interface DatasetMetadata {
   exchange?: 'BINANCE' | 'BYBIT' | 'MOCK';
   marketType?: 'PERPETUAL' | 'SPOT';
   source: 'DEMO_SYNTHETIC' | 'EXCHANGE_API' | 'LOCAL_CACHE';
-  providerName: string;
+  providerName?: string;
   symbol: string;
   timeframe: string;
   dateRange?: {
@@ -70,11 +70,11 @@ export interface DatasetMetadata {
   maxPrice?: number;
   minVolume?: number;
   maxVolume?: number;
-  timezone: string;
+  timezone?: string;
   seed?: number;
   version?: string;
   isSynthetic: boolean;
-  validationStatus: 'PASSED' | 'WARNINGS' | 'FAILED';
+  validationStatus?: 'PASSED' | 'WARNINGS' | 'FAILED';
   validationNotes?: string[];
 }
 
@@ -227,7 +227,11 @@ export interface EquityPoint {
   drawdownPct: number;
   pnl: number;
   cumulativePnl: number;
+  cash?: number;
   cashBalance?: number;
+  margin?: number;
+  benchmarkPrice?: number;
+  returnsPct?: number;
   positionNotional?: number;
   unrealizedPnl?: number;
   realizedPnl?: number;
@@ -402,6 +406,12 @@ export interface BacktestResult {
   tradeLedger?: TradeLedgerEntry[];
   invariantsPassed?: boolean;
   invariantCheckErrors?: string[];
+  auditReport?: {
+    passed: boolean;
+    invariantsChecked: number;
+    violations: any[];
+    summary: string;
+  };
 }
 
 export interface BacktestRunRecord {
